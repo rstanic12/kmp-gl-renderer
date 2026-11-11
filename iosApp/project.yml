@@ -1,0 +1,42 @@
+# Generate the Xcode project with: xcodegen generate (inside iosApp/)
+name: GLRenderer
+options:
+  bundleIdPrefix: agency.encrypt
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  GLRenderer:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: ../assets
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - sdk: OpenGLES.framework
+      - sdk: GLKit.framework
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: GL Renderer
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: agency.encrypt.glrenderer
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        FRAMEWORK_SEARCH_PATHS: $(SRCROOT)/../engine/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
+        OTHER_LDFLAGS: [$(inherited), -framework, Engine]
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        GCC_PREPROCESSOR_DEFINITIONS: [$(inherited), GLES_SILENCE_DEPRECATION=1]
+    preBuildScripts:
+      - name: Build Kotlin engine framework
+        basedOnDependencyAnalysis: false
+        script: |
+          cd "$SRCROOT/.."
+          ./gradlew :engine:embedAndSignAppleFrameworkForXcode

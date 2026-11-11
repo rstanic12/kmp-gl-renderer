@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests and APK
+        run: ./gradlew :engine:testDebugUnitTest :androidApp:assembleDebug
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Engine tests on the iOS simulator
+        run: ./gradlew :engine:iosSimulatorArm64Test
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd iosApp && xcodegen generate
+      - name: Pick and boot a simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+      - name: Build app
+        run: |
+          xcodebuild -project iosApp/GLRenderer.xcodeproj -scheme GLRenderer -configuration Debug \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build/ios \
+            CODE_SIGNING_ALLOWED=NO build
+      - name: Run and screenshot
+        run: |
+          xcrun simctl install "$UDID" build/ios/Build/Products/Debug-iphonesimulator/GLRenderer.app
+          xcrun simctl launch "$UDID" agency.encrypt.glrenderer
+          sleep 15
+          xcrun simctl io "$UDID" screenshot ios-simulator.png
+          if ! xcrun simctl spawn "$UDID" launchctl list | grep -q agency.encrypt.glrenderer; then
+            echo "App is not running after launch:"
+            xcrun simctl spawn "$UDID" log show --last 2m --predicate 'process == "GLRenderer"' | tail -50
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        # The screenshot is for looking at, not a check: a full artifact quota must not fail the build.
+        continue-on-error: true
+        with:
+          name: ios-simulator-screenshot
+          path: ios-simulator.png
+          retention-days: 7
