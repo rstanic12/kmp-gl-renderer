@@ -18,13 +18,13 @@ class DemoAssetsTest {
 
     @Test
     fun everyModelResolvesItsMaterialsAndTextures() {
-        for (name in listOf("turntable.obj", "teapot.obj", "lid.obj")) {
+        for (name in listOf("floor.obj", "turntable.obj", "teapot.obj", "lid.obj", "bulb.obj")) {
             val (obj, materials) = load(name)
             assertTrue(obj.subMeshes.isNotEmpty(), name)
             for (mesh in obj.subMeshes) {
                 val material = materials[mesh.material]
                 assertTrue(material != null, "$name: material ${mesh.material} not found")
-                material.diffuseMap?.let { assertTrue(File(dir, it).isFile, "$name: missing texture $it") }
+                material.baseColorMap?.let { assertTrue(File(dir, it).isFile, "$name: missing texture $it") }
             }
         }
     }

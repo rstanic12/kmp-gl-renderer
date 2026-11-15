@@ -25,23 +25,32 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val app = DemoApp(AndroidGl(), AndroidAssetSource(assets))
+        val padding = (24 * resources.displayMetrics.density).toInt()
 
-        surface = DemoSurface(this, app)
-        val hint = TextView(this).apply {
+        val status = label(15f, 220).apply { setPadding(0, padding * 2, 0, 0) }
+        val hint = label(13f, 170).apply {
             setText(R.string.hint)
-            setTextColor(Color.argb(170, 255, 255, 255))
-            textSize = 13f
-            setPadding(0, 0, 0, (24 * resources.displayMetrics.density).toInt())
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 0, 0, padding)
         }
+        surface = DemoSurface(this, app) { text -> runOnUiThread { status.text = text } }
         setContentView(FrameLayout(this).apply {
             addView(surface)
-            addView(hint, FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-            ))
+            addView(status, overlay(Gravity.TOP))
+            addView(hint, overlay(Gravity.BOTTOM))
         })
     }
+
+    private fun label(size: Float, alpha: Int) = TextView(this).apply {
+        setTextColor(Color.argb(alpha, 255, 255, 255))
+        textSize = size
+    }
+
+    private fun overlay(edge: Int) = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        edge or Gravity.CENTER_HORIZONTAL,
+    )
 
     override fun onResume() {
         super.onResume()
@@ -54,9 +63,16 @@ class MainActivity : Activity() {
     }
 }
 
-/** Hosts [DemoApp]: GL callbacks run on the render thread, and touch input is queued onto it. */
+/**
+ * Hosts [DemoApp]: GL callbacks run on the render thread, and touch input is queued onto it.
+ * [onStatus] is called from the render thread whenever the status line may have changed.
+ */
 @SuppressLint("ViewConstructor")
-private class DemoSurface(activity: Activity, private val app: DemoApp) : GLSurfaceView(activity) {
+private class DemoSurface(
+    activity: Activity,
+    private val app: DemoApp,
+    private val onStatus: (String) -> Unit,
+) : GLSurfaceView(activity) {
 
     private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
@@ -75,18 +91,37 @@ private class DemoSurface(activity: Activity, private val app: DemoApp) : GLSurf
             return true
         }
 
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+            queueEvent {
+                app.togglePipeline()
+                onStatus(app.status)
+            }
+            return true
+        }
+
         override fun onDoubleTap(e: MotionEvent): Boolean {
             queueEvent { app.toggleLid() }
             return true
+        }
+
+        override fun onLongPress(e: MotionEvent) {
+            queueEvent {
+                app.togglePause()
+                onStatus(app.status)
+            }
         }
     })
 
     init {
         setEGLContextClientVersion(3)
-        setEGLConfigChooser(MultisampleConfigChooser())
+        setEGLConfigChooser(Es3ConfigChooser())
         preserveEGLContextOnPause = true
         setRenderer(object : Renderer {
-            override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) = app.surfaceCreated()
+            override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+                app.surfaceCreated()
+                onStatus(app.status)
+            }
+
             override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) = app.surfaceChanged(width, height)
             override fun onDrawFrame(gl: GL10?) = app.drawFrame(SystemClock.elapsedRealtimeNanos() / 1e9)
         })

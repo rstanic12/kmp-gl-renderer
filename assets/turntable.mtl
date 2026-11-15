@@ -1,7 +1,5 @@
 newmtl turntable
-Ka 0.25 0.25 0.25
 Kd 1.0 1.0 1.0
-Ks 0.15 0.15 0.15
-Ns 24
-d 1.0
+Pr 0.5
+Pm 0.0
 map_Kd turntable.png

@@ -6,6 +6,9 @@ data class Vec3(val x: Float = 0f, val y: Float = 0f, val z: Float = 0f) {
     operator fun plus(o: Vec3) = Vec3(x + o.x, y + o.y, z + o.z)
     operator fun minus(o: Vec3) = Vec3(x - o.x, y - o.y, z - o.z)
     operator fun times(s: Float) = Vec3(x * s, y * s, z * s)
+
+    /** Component-wise, for colours. */
+    operator fun times(o: Vec3) = Vec3(x * o.x, y * o.y, z * o.z)
     operator fun unaryMinus() = Vec3(-x, -y, -z)
 
     infix fun dot(o: Vec3) = x * o.x + y * o.y + z * o.z

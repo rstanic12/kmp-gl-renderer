@@ -7,8 +7,9 @@ struct GLRendererApp: App {
             RendererView()
                 .ignoresSafeArea()
                 .overlay(alignment: .bottom) {
-                    Text("Drag to orbit · pinch to zoom · double-tap to open the lid")
+                    Text("Drag to orbit · pinch to zoom · double-tap: lid\ntap: deferred / forward+ · long-press: pause")
                         .font(.footnote)
+                        .multilineTextAlignment(.center)
                         .foregroundStyle(.white.opacity(0.65))
                         .padding(.bottom, 24)
                 }

@@ -51,6 +51,10 @@ jobs:
           xcrun simctl launch "$UDID" agency.encrypt.glrenderer
           sleep 15
           xcrun simctl io "$UDID" screenshot ios-simulator.png
+          # Also in the log, which still works when the account's artifact storage is full.
+          echo "::group::Screenshot (base64 PNG)"
+          base64 -i ios-simulator.png
+          echo "::endgroup::"
           if ! xcrun simctl spawn "$UDID" launchctl list | grep -q agency.encrypt.glrenderer; then
             echo "App is not running after launch:"
             xcrun simctl spawn "$UDID" log show --last 2m --predicate 'process == "GLRenderer"' | tail -50

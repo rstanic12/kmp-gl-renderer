@@ -59,6 +59,22 @@ class Mat4Test {
     }
 
     @Test
+    fun inverseUndoesTheTransform() {
+        val m = Mat4.perspective(50f, 1.3f, 0.1f, 50f) * Mat4.lookAt(Vec3(2f, 3f, 4f), Vec3.ZERO, Vec3.UP) *
+            Mat4.trs(Vec3(1f, -2f, 0.5f), Vec3(10f, 20f, 30f), Vec3(1f, 2f, 3f))
+        val product = (m * m.inverse()).toFloatArray()
+        val identity = Mat4.IDENTITY.toFloatArray()
+        for (i in 0 until 16) assertEquals(identity[i], product[i], 1e-4f)
+    }
+
+    @Test
+    fun orthographicMapsTheBoxToTheClipCube() {
+        val o = Mat4.orthographic(-2f, 2f, -1f, 1f, 1f, 9f)
+        assertNear(Vec3(-1f, -1f, -1f), o.transformPoint(Vec3(-2f, -1f, -1f)))
+        assertNear(Vec3(1f, 1f, 1f), o.transformPoint(Vec3(2f, 1f, -9f)))
+    }
+
+    @Test
     fun normalMatrixKeepsNormalsPerpendicularUnderNonUniformScale() {
         val model = Mat4.rotationZ(30f) * Mat4.scale(Vec3(4f, 1f, 1f))
         // A 45-degree slope in the xy plane, its tangent and its normal.

@@ -41,7 +41,7 @@ class OrbitCamera(
     }
 
     fun viewProjection(aspect: Float): Mat4 =
-        Mat4.perspective(effectiveFovY(aspect), aspect, 0.1f, 100f) * Mat4.lookAt(eye(), target, Vec3.UP)
+        Mat4.perspective(effectiveFovY(aspect), aspect, NEAR, FAR) * Mat4.lookAt(eye(), target, Vec3.UP)
 
     /** On portrait screens, widen the vertical FOV so the horizontal FOV never drops below [fovYDegrees]. */
     fun effectiveFovY(aspect: Float): Float {
@@ -50,9 +50,11 @@ class OrbitCamera(
         return (2f * atan(tan(halfFov) / aspect) * 180f / PI.toFloat()).coerceAtMost(MAX_FOV_Y)
     }
 
-    private companion object {
-        const val MIN_PITCH = -10f
-        const val MAX_PITCH = 85f
-        const val MAX_FOV_Y = 100f
+    companion object {
+        const val NEAR = 0.1f
+        const val FAR = 100f
+        private const val MIN_PITCH = -10f
+        private const val MAX_PITCH = 85f
+        private const val MAX_FOV_Y = 100f
     }
 }

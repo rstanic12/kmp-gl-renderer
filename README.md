@@ -1,27 +1,78 @@
 # kmp-gl-renderer
 
-A small OpenGL ES 3 renderer and entity-component system written in **Kotlin Multiplatform**.
+An OpenGL ES 3 renderer and entity-component system written in **Kotlin Multiplatform**: deferred and
+forward+ pipelines, metal/roughness PBR, shadow maps, HDR with bloom and tonemapping, FXAA and instancing.
 The engine, scene, OBJ/MTL loaders, math and the whole renderer are common Kotlin;
 Android and iOS each contribute only a thin GL binding and an asset reader.
 
-<p align="center"><img src="docs/demo.gif" width="440" alt="Utah teapot on a spinning turntable; the lid lifts and tips open"></p>
+<p align="center"><img src="docs/demo.gif" width="360" alt="Utah teapot on a spinning turntable, ringed by 32 coloured point lights"></p>
 
-The demo is the Utah teapot on a spinning turntable. Drag to orbit, pinch to zoom, double-tap to open the lid.
-The lid is a child entity of the teapot, which is a child of the turntable, so it rides along while it animates.
+The demo is the Utah teapot on a spinning turntable, circled by three rings of coloured point lights (32 in all).
+Drag to orbit, pinch to zoom, double-tap to open the lid, tap to switch between the deferred and forward+ pipelines,
+long-press to pause. The lid is a child entity of the teapot, which is a child of the turntable, and each light
+is a child of its ring, so the transform hierarchy carries everything along.
 
-## Features
+| Deferred | Forward+ |
+|---|---|
+| <img src="docs/deferred.png" width="400"> | <img src="docs/forward-plus.png" width="400"> |
 
-- **Shared renderer** — per-pixel Blinn-Phong with a key light and a sky/ground hemisphere fill, lit in linear space;
-  diffuse textures with mipmaps; transparent materials drawn back to front after the opaque pass;
-  double-sided shading for open meshes.
+The two pipelines shade with the same GLSL functions and produce the same image: on the paused demo frame above,
+the mean difference is 0.5/255 and no pixel differs by more than 36/255 (the residue is the 8-bit G-buffer).
+
+## Rendering
+
+Each frame:
+
+```mermaid
+flowchart LR
+    shadow["Shadow map<br/>2048² depth, key light"]
+    subgraph deferred["Deferred"]
+        gbuf["G-buffer<br/>albedo · normal · emission · depth"]
+        light["Lighting<br/>ambient + key light, full screen;<br/>one scissored pass per point light"]
+        gbuf --> light
+    end
+    subgraph forward["Forward+"]
+        tiles["Tile light lists<br/>32 px tiles, built on the CPU"]
+        fwd["One forward pass<br/>loops over its tile's lights"]
+        tiles --> fwd
+    end
+    trans["Transparent surfaces<br/>forward+, back to front"]
+    post["Bloom → ACES tonemap → FXAA"]
+    shadow --> deferred & forward
+    deferred & forward --> trans --> post
+```
+
+- **PBR** — Cook-Torrance (GGX distribution, Schlick-GGX visibility, Schlick Fresnel) with Lambert diffuse;
+  metal/roughness materials from the MTL PBR extension (`Pr`, `Pm`, `Ke`), with a fallback from Blinn-Phong `Ns`.
+  Ambient is a sky/ground gradient with Karis' analytic split-sum approximation for its specular part.
+  Base-colour textures are `SRGB8_ALPHA8`, so filtering happens in linear space.
+- **Deferred** — three render targets (√albedo + metallic, normal + roughness, HDR emission) and a depth texture
+  that world positions are reconstructed from. Each point light is drawn as a full-screen triangle scissored
+  to the screen rectangle its sphere of influence projects to, added on with additive blending.
+- **Forward+** — ES 3.0 has no compute shaders, so the light grid is built on the CPU: each light's screen rectangle
+  is binned into 32-pixel tiles, and the per-tile lists (up to 63 lights) go to the GPU as an RGBA32F texture
+  that the fragment shader reads with `texelFetch`. The same pass also shades transparent surfaces in the
+  deferred path, which a G-buffer cannot hold.
+- **Shadows** — an orthographic shadow map fitted to a bounding sphere, sampled through a `sampler2DShadow`
+  with hardware comparison and a 3×3 PCF kernel; slope-scaled polygon offset plus a normal offset against acne.
+- **HDR and post-processing** — lighting accumulates in an `RGBA16F` target. Bloom is a five-level mip chain
+  (soft-threshold prefilter, 4-tap downsample, tent upsample), followed by exposure, the ACES filmic curve and FXAA.
+  If the GPU can't render to half-float (`EXT_color_buffer_half_float`), everything falls back to 8-bit targets
+  and the renderer reports `hdr == false`.
+- **Instancing** — draws are grouped by mesh; each group is one `glDrawArraysInstanced` with per-instance model
+  matrix, normal matrix and tint in a dynamic vertex buffer. The 32 light bulbs are one draw call.
+
+## Engine
+
 - **Entity-component system** — entities are bags of plain data components; systems (spin, animation,
   transform hierarchy) run in order each frame. World matrices are resolved through any depth of `Parent` links,
-  with cycle detection.
+  with cycle detection. Lights are components (`PointLight`), as is per-instance colour (`Tint`).
 - **Asset pipeline** — OBJ (polygons, all index forms, negative indices, `usemtl` splits, generated face normals)
   and MTL readers that work on plain text, so they are unit-tested without a device.
   Each mesh is uploaded to the GPU once as an interleaved VBO in a VAO.
-- **Two platforms, one GL interface** — `Gl` is a ~25-method interface implemented with `GLES30` on Android
-  and Kotlin/Native's `platform.gles3` bindings on iOS.
+- **Two platforms, one GL interface** — `Gl` is a ~40-method interface implemented with `GLES30` on Android
+  and Kotlin/Native's `platform.gles3` bindings on iOS. The renderer's tests run against a recording fake of it,
+  checking pass order, instancing, light culling and the half-float fallback without a GPU.
 
 ## Architecture
 
@@ -30,8 +81,8 @@ flowchart LR
     subgraph common["engine · commonMain"]
         demo["demo<br/>DemoApp · DemoScene · LidSystem"]
         ecs["ecs<br/>World · Entity · System"]
-        scene["scene<br/>Transform · Parent · Spin<br/>TransformSystem · OrbitCamera"]
-        render["render<br/>Renderer · Shaders"]
+        scene["scene<br/>Transform · Parent · Spin<br/>PointLight · Tint<br/>TransformSystem · OrbitCamera"]
+        render["render<br/>Renderer · Shaders · RenderTargets<br/>LightCulling · TileGrid"]
         assets["assets<br/>ObjParser · MtlParser"]
         gl["gl<br/>Gl interface"]
         math["math<br/>Vec3 · Mat4"]
@@ -51,12 +102,15 @@ flowchart LR
 ```
 
 Each frame the host calls `DemoApp.drawFrame(time)`: the `World` runs its systems
-(spin → lid animation → transform hierarchy), then `Renderer` draws every entity with a `ModelRef`.
+(spin → lid animation → transform hierarchy), then `Renderer` draws every entity with a `ModelRef`,
+lit by every entity with a `PointLight`.
 Input is forwarded on the GL thread (`queueEvent` on Android; GLKit already draws on the main thread).
 
-| Android | Lid open |
-|---|---|
-| <img src="docs/android.png" width="400"> | <img src="docs/lid-open.png" width="400"> |
+## Limits
+
+Point lights don't cast shadows; only the key light does. Forward+ tiles are 2D (no depth slices), so a tile
+spanning near and far surfaces shades lights for both. Light screen rectangles come from the sphere's bounding box,
+which over-covers by up to about 1.7×. The renderer targets OpenGL ES 3.0, which Apple has deprecated in favour of Metal.
 
 ## Building
 
@@ -90,14 +144,15 @@ uploads a screenshot from the iOS simulator.
 
 `assets/` is generated by `python tools/generate_assets.py` (standard library only):
 the teapot and lid are tessellated from Martin Newell's 1975 Bézier patch data
-(as distributed with three.js), the turntable is a procedural cylinder, and its texture is drawn in code.
+(as distributed with three.js); the turntable, floor and light bulbs are procedural, and the turntable's
+texture is drawn in code.
 
 ## History
 
 Started in 2020 as an experiment in sharing OpenGL code through Kotlin Multiplatform, and grew an ECS and
 a model viewer in 2021–22. Rebuilt in 2026 on current Kotlin, AGP and Gradle: GPU buffers uploaded once
-instead of every frame, ES 3 throughout, lighting moved to the fragment shader, a pure-Kotlin matrix library,
-a real iOS backend, tests and CI.
+instead of every frame, ES 3 throughout, a pure-Kotlin matrix library, a real iOS backend, tests and CI;
+then the deferred and forward+ pipelines, PBR, shadows, HDR post-processing and instancing.
 
 ## License
 

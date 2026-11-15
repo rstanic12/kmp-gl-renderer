@@ -4,9 +4,13 @@ import QuartzCore
 
 /// Hosts the shared Kotlin `DemoApp` in a GLKView. GLKit draws on the main thread,
 /// so gestures can call into the app directly.
+///
+/// The view has no depth buffer and no MSAA: the renderer draws into its own framebuffers,
+/// antialiases with FXAA and only writes the finished image to GLKView's framebuffer.
 final class RendererViewController: GLKViewController {
     private var app: DemoApp!
     private var lastPan = CGPoint.zero
+    private let status = UILabel()
 
     override func loadView() {
         view = GLKView(frame: UIScreen.main.bounds)
@@ -20,24 +24,40 @@ final class RendererViewController: GLKViewController {
         let glView = view as! GLKView
         glView.context = context
         glView.delegate = self
-        glView.drawableDepthFormat = .format24
-        glView.drawableMultisample = .multisample4X
         preferredFramesPerSecond = 60
 
         EAGLContext.setCurrent(context)
         app = DemoApp(gl: IosGl(), assets: BundleAssetSource(directory: "assets"))
         app.surfaceCreated()
 
-        glView.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(pan(_:))))
-        glView.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinch(_:))))
+        status.font = .preferredFont(forTextStyle: .subheadline)
+        status.textColor = UIColor.white.withAlphaComponent(0.85)
+        status.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(status)
+        NSLayoutConstraint.activate([
+            status.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            status.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
+        ])
+        updateStatus()
+
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTap))
         doubleTap.numberOfTapsRequired = 2
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tap))
+        tap.require(toFail: doubleTap)
+        glView.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(pan(_:))))
+        glView.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinch(_:))))
         glView.addGestureRecognizer(doubleTap)
+        glView.addGestureRecognizer(tap)
+        glView.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(longPress(_:))))
     }
 
     override func glkView(_ view: GLKView, drawIn rect: CGRect) {
         app.surfaceChanged(width: Int32(view.drawableWidth), height: Int32(view.drawableHeight))
         app.drawFrame(timeSeconds: CACurrentMediaTime())
+    }
+
+    private func updateStatus() {
+        status.text = app.status
     }
 
     @objc private func pan(_ gesture: UIPanGestureRecognizer) {
@@ -54,7 +74,18 @@ final class RendererViewController: GLKViewController {
         gesture.scale = 1
     }
 
+    @objc private func tap() {
+        app.togglePipeline()
+        updateStatus()
+    }
+
     @objc private func doubleTap() {
         app.toggleLid()
+    }
+
+    @objc private func longPress(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        app.togglePause()
+        updateStatus()
     }
 }

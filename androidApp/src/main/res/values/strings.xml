@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">GL Renderer</string>
-    <string name="hint">Drag to orbit · pinch to zoom · double-tap to open the lid</string>
+    <string name="hint">Drag to orbit · pinch to zoom · double-tap: lid\ntap: deferred / forward+ · long-press: pause</string>
 </resources>

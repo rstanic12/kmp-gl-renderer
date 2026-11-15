@@ -23,3 +23,12 @@ data class ModelRef(val path: String) : Component
 
 /** Continuous rotation, in degrees per second on each axis. */
 data class Spin(val degreesPerSecond: Vec3) : Component
+
+/** Linear colour that multiplies a model's base colour and emission, so instances of one mesh can differ. */
+data class Tint(val color: Vec3) : Component
+
+/**
+ * A point light at the entity's world position. [color] is linear and carries the intensity;
+ * the light fades smoothly to nothing at [radius], which is also what culling uses.
+ */
+data class PointLight(val color: Vec3, val radius: Float) : Component

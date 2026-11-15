@@ -6,21 +6,34 @@ import agency.encrypt.glrenderer.ecs.World
 import agency.encrypt.glrenderer.math.Mat4
 import agency.encrypt.glrenderer.math.Vec3
 import agency.encrypt.glrenderer.scene.ModelRef
+import agency.encrypt.glrenderer.scene.OrbitCamera
 import agency.encrypt.glrenderer.scene.Parent
+import agency.encrypt.glrenderer.scene.PointLight
 import agency.encrypt.glrenderer.scene.Spin
 import agency.encrypt.glrenderer.scene.SpinSystem
+import agency.encrypt.glrenderer.scene.Tint
 import agency.encrypt.glrenderer.scene.Transform
 import agency.encrypt.glrenderer.scene.TransformSystem
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
+ * floor
  * turntable (spins)
  * └── teapot
  *     └── lid (lifts and tips open on request)
+ * light ring × 3 (each spins at its own speed)
+ * └── point light + bulb × n
  *
- * The lid only knows its offset from the teapot; spinning the turntable carries both along.
+ * The lid only knows its offset from the teapot, and each light only its place on its ring:
+ * the transform hierarchy carries them along.
  */
 object DemoScene {
     fun create(): World = World().apply {
+        createEntity()
+            .add(Transform(position = Vec3(0f, -0.12f, 0f)))
+            .add(ModelRef("floor.obj"))
         val turntable = createEntity()
             .add(Transform())
             .add(Spin(Vec3(0f, 18f, 0f)))
@@ -35,14 +48,50 @@ object DemoScene {
             .add(ModelRef("lid.obj"))
             .add(Lid())
 
+        lightRing(count = 12, radius = 2.4f, height = 0.25f, degreesPerSecond = 24f, hueOffset = 0f)
+        lightRing(count = 6, radius = 1.0f, height = 1.9f, degreesPerSecond = -40f, hueOffset = 0.5f)
+        lightRing(count = 14, radius = 3.6f, height = 0.1f, degreesPerSecond = 11f, hueOffset = 0.25f)
+
         addSystem(SpinSystem())
         addSystem(LidSystem())
         addSystem(TransformSystem())
     }
 
+    fun camera() = OrbitCamera(target = Vec3(0f, 0.45f, 0f), yawDegrees = 35f, pitchDegrees = 24f, distance = 5.6f)
+
     fun toggleLid(world: World) {
         world.each<Lid> { entity, lid -> entity.add(lid.copy(open = !lid.open)) }
     }
+
+    private fun World.lightRing(count: Int, radius: Float, height: Float, degreesPerSecond: Float, hueOffset: Float) {
+        val ring = createEntity()
+            .add(Transform(position = Vec3(0f, height, 0f)))
+            .add(Spin(Vec3(0f, degreesPerSecond, 0f)))
+        repeat(count) { i ->
+            val angle = 2f * PI.toFloat() * i / count
+            val color = hue(hueOffset + i.toFloat() / count)
+            createEntity()
+                .add(Transform(position = Vec3(cos(angle) * radius, 0f, sin(angle) * radius)))
+                .add(Parent(ring.id))
+                .add(PointLight(color * LIGHT_INTENSITY, LIGHT_RADIUS))
+                .add(ModelRef("bulb.obj"))
+                .add(Tint(color * BULB_GLOW))
+        }
+    }
+
+    /** HSV to RGB at full value, with the hue [h] in turns. */
+    private fun hue(h: Float): Vec3 {
+        fun channel(n: Float): Float {
+            val k = (n + h * 6f) % 6f
+            return 1f - SATURATION * minOf(k, 4f - k, 1f).coerceAtLeast(0f)
+        }
+        return Vec3(channel(5f), channel(3f), channel(1f))
+    }
+
+    private const val SATURATION = 0.8f
+    private const val LIGHT_INTENSITY = 5f
+    private const val LIGHT_RADIUS = 1.8f
+    private const val BULB_GLOW = 12f
 }
 
 data class Lid(val open: Boolean = false, val progress: Float = 0f) : Component

@@ -5,7 +5,9 @@
 teapot.obj / lid.obj  tessellated from Newell's Bezier patches (newell_teapot.json)
 turntable.obj         a textured cylinder the teapot sits on
 turntable.png         procedural texture for the turntable top
-*.mtl                 materials
+floor.obj             a large disc for the lights to pool on
+bulb.obj              the small sphere drawn at each point light
+*.mtl                 metal/roughness materials
 """
 import json
 import math
@@ -158,6 +160,52 @@ def cylinder(radius, height, segments):
     return positions, normals, uvs, triangles
 
 
+def disc(radius, rings, segments):
+    """An upward-facing disc at y = 0, in concentric rings.
+
+    A plain triangle fan would do, but the camera stands inside this disc, and the iOS simulator
+    drops fan triangles that long when they cross the near plane. Small triangles clip correctly.
+    """
+    positions, normals, uvs, triangles = [[0.0, 0.0, 0.0]], [[0.0, 1.0, 0.0]], [[0.5, 0.5]], []
+    for r in range(1, rings + 1):
+        for i in range(segments + 1):
+            a = 2 * math.pi * i / segments
+            d = radius * r / rings
+            positions.append([d * math.cos(a), 0.0, d * math.sin(a)])
+            normals.append([0.0, 1.0, 0.0])
+            uvs.append([0.5 + 0.5 * d / radius * math.cos(a), 0.5 + 0.5 * d / radius * math.sin(a)])
+    row = segments + 1
+    for i in range(segments):
+        add_triangle(triangles, positions, normals, 0, 1 + i, 2 + i)
+    for r in range(rings - 1):
+        for i in range(segments):
+            a, b = 1 + r * row + i, 1 + r * row + i + 1
+            c, d = a + row, b + row
+            add_triangle(triangles, positions, normals, a, b, d)
+            add_triangle(triangles, positions, normals, a, d, c)
+    return positions, normals, uvs, triangles
+
+
+def sphere(radius, rings, sectors):
+    positions, normals, uvs, triangles = [], [], [], []
+    for r in range(rings + 1):
+        phi = math.pi * r / rings
+        for s in range(sectors + 1):
+            theta = 2 * math.pi * s / sectors
+            n = [math.sin(phi) * math.cos(theta), math.cos(phi), math.sin(phi) * math.sin(theta)]
+            positions.append([radius * c for c in n])
+            normals.append(n)
+            uvs.append([s / sectors, 1 - r / rings])
+    row = sectors + 1
+    for r in range(rings):
+        for s in range(sectors):
+            a, b = r * row + s, r * row + s + 1
+            c, d = a + row, b + row
+            add_triangle(triangles, positions, normals, a, b, d)
+            add_triangle(triangles, positions, normals, a, d, c)
+    return positions, normals, uvs, triangles
+
+
 def write_png(path, width, height, pixel):
     raw = bytearray()
     for y in range(height):
@@ -222,18 +270,27 @@ def main():
     lid.mesh("Lid", "glaze", *tessellate(data, groups["lid"], widen=1.077))
     lid.save(OUT / "lid.obj")
 
-    (OUT / "teapot.mtl").write_text(
-        "newmtl glaze\nKa 0.20 0.06 0.05\nKd 0.72 0.16 0.12\nKs 0.90 0.90 0.90\nNs 180\nd 1.0\n", newline="\n"
-    )
+    # Metal/roughness materials: Kd is the base colour, Pr roughness, Pm metallic, Ke emission (linear, may exceed 1).
+    (OUT / "teapot.mtl").write_text("newmtl glaze\nKd 0.72 0.16 0.12\nPr 0.18\nPm 0.0\n", newline="\n")
 
     table = ObjWriter("turntable.mtl")
     table.mesh("Turntable", "turntable", *cylinder(1.7, 0.12, 64))
     table.save(OUT / "turntable.obj")
     (OUT / "turntable.mtl").write_text(
-        "newmtl turntable\nKa 0.25 0.25 0.25\nKd 1.0 1.0 1.0\nKs 0.15 0.15 0.15\nNs 24\nd 1.0\nmap_Kd turntable.png\n",
-        newline="\n",
+        "newmtl turntable\nKd 1.0 1.0 1.0\nPr 0.5\nPm 0.0\nmap_Kd turntable.png\n", newline="\n"
     )
     write_png(OUT / "turntable.png", 512, 512, turntable_pixel(512))
+
+    floor = ObjWriter("floor.mtl")
+    floor.mesh("Floor", "floor", *disc(9.0, 24, 96))
+    floor.save(OUT / "floor.obj")
+    (OUT / "floor.mtl").write_text("newmtl floor\nKd 0.14 0.14 0.15\nPr 0.35\nPm 0.0\n", newline="\n")
+
+    # Each light's bulb: black, so it only shows its emission, which instances tint with their light's colour.
+    bulb = ObjWriter("bulb.mtl")
+    bulb.mesh("Bulb", "bulb", *sphere(0.045, 8, 12))
+    bulb.save(OUT / "bulb.obj")
+    (OUT / "bulb.mtl").write_text("newmtl bulb\nKd 0.0 0.0 0.0\nPr 1.0\nKe 1.0 1.0 1.0\n", newline="\n")
 
     print("written to", OUT)
 
