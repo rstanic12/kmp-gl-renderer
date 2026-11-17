@@ -202,6 +202,42 @@ class RendererTest {
     }
 
     @Test
+    fun shadowedPointLightsRenderSixFacesOfOnlyTheCastersTheyReach() {
+        val gl = RecordingGl()
+        val renderer = renderer(gl)
+        val world = scene(Vec3.ZERO, Vec3(20f, 0f, 0f)).apply {
+            createEntity().add(Transform(position = Vec3(0.5f, 2f, 0f))).add(PointLight(Vec3.ONE, 3f, castsShadows = true))
+            createEntity().add(Transform(position = Vec3(-0.5f, 2f, 0f))).add(PointLight(Vec3.ONE, 3f))
+            update(0f)
+        }
+
+        renderer.render(world, OrbitCamera())
+
+        assertEquals(1, renderer.shadowedLights)
+        // Six cube faces with the one nearby box (the far one is out of reach), then the key light's map with both.
+        assertEquals(List(6) { "draw shadow 6 x1" } + "draw shadow 6 x2", gl.draws().filter { it.startsWith("draw shadow") })
+    }
+
+    @Test
+    fun theShadowedLightBudgetIsCapped() {
+        val gl = RecordingGl()
+        val renderer = renderer(gl)
+        val world = scene(Vec3.ZERO).apply {
+            repeat(Shaders.POINT_SHADOW_SLOTS + 3) {
+                createEntity().add(Transform(position = Vec3(it * 0.1f, 1f, 0f))).add(PointLight(Vec3.ONE, 3f, castsShadows = true))
+            }
+            update(0f)
+        }
+
+        renderer.render(world, OrbitCamera())
+
+        assertEquals(Shaders.POINT_SHADOW_SLOTS, renderer.shadowedLights)
+        renderer.pointShadows = false
+        renderer.render(world, OrbitCamera())
+        assertEquals(0, renderer.shadowedLights)
+    }
+
+    @Test
     fun postProcessingRunsBloomChainThenTonemapThenFxaa() {
         val gl = RecordingGl()
         Renderer(gl, assets).apply { resize(64, 64) }.render(scene(Vec3.ZERO), OrbitCamera())

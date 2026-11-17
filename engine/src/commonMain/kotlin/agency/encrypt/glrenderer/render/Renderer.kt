@@ -17,14 +17,17 @@ import agency.encrypt.glrenderer.scene.OrbitCamera
 import agency.encrypt.glrenderer.scene.PointLight
 import agency.encrypt.glrenderer.scene.Tint
 import agency.encrypt.glrenderer.scene.WorldTransform
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.atan
 import kotlin.math.pow
+import kotlin.math.sqrt
 
 enum class Pipeline(val label: String) {
     /** G-buffer, then lighting per light over the pixels it can reach. */
     DEFERRED("Deferred"),
 
-    /** One shading pass per surface, looping over a per-tile light list. */
+    /** One shading pass per surface, looping over its cluster's light list. */
     FORWARD_PLUS("Forward+"),
 }
 
@@ -33,8 +36,9 @@ enum class Pipeline(val label: String) {
  * with a shadow map and a sky/ground ambient term. Shading is metal/roughness PBR into an HDR target, followed by
  * bloom, ACES tonemapping and FXAA.
  *
- * Frame: shadow map → (deferred: G-buffer + lighting passes | forward+: one forward pass) → transparent surfaces,
- * forward-shaded back to front → bloom → tonemap → FXAA. Meshes drawn more than once are instanced.
+ * Frame: point light cube shadows → key light shadow → (deferred: G-buffer + lighting passes | forward+: one clustered
+ * forward pass) → transparent surfaces, forward-shaded back to front → bloom → tonemap → FXAA.
+ * Meshes drawn more than once are instanced.
  *
  * Must be created and used on the thread that owns the GL context. GPU resources are created lazily the
  * first time a model is drawn and live as long as the context; after a context loss, create a new Renderer.
@@ -43,6 +47,9 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
 
     var pipeline = Pipeline.DEFERRED
     var shadows = true
+
+    /** Cube shadows for point lights with [PointLight.castsShadows], up to [Shaders.POINT_SHADOW_SLOTS] of them. */
+    var pointShadows = true
     var bloom = true
     var fxaa = true
 
@@ -72,11 +79,8 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     var visibleLights = 0
         private set
 
-    /**
-     * Forward+ only: how many (tile, light) pairs were dropped last frame because a tile's list was full.
-     * Anything above zero shows up as tile-shaped seams in the lighting.
-     */
-    var droppedTileLights = 0
+    /** Point lights that rendered a cube shadow map in the last frame. */
+    var shadowedLights = 0
         private set
 
     private class GpuMaterial(
@@ -91,9 +95,19 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         val isEmissive get() = emissive != Vec3.ZERO
     }
 
-    private class GpuPart(val vertexArray: Int, val vertexCount: Int, val instanceBuffer: Int, val material: GpuMaterial)
+    /** One material's triangles of a model; [boundsCenter] and [boundsRadius] bound them in model space. */
+    private class GpuPart(
+        val vertexArray: Int,
+        val vertexCount: Int,
+        val instanceBuffer: Int,
+        val material: GpuMaterial,
+        val boundsCenter: Vec3,
+        val boundsRadius: Float,
+    )
+
     private class Instance(val model: Mat4, val tint: Vec3)
     private class TransparentDraw(val part: GpuPart, val instance: Instance, val distance: Float)
+    private class VisibleLight(val position: Vec3, val radius: Float, val color: Vec3, val rect: PixelRect, val shadowSlot: Int)
 
     private val shadowProgram = Program(gl, Shaders.GEOMETRY_VERTEX, Shaders.SHADOW_FRAGMENT)
     private val geometryProgram = Program(gl, Shaders.GEOMETRY_VERTEX, Shaders.GBUFFER_FRAGMENT)
@@ -108,10 +122,16 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     private val emptyVertexArray = gl.createVertexArray()
     private val shadowMap = gl.createRenderTexture(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, TextureFormat.SHADOW_DEPTH24)
     private val shadowFramebuffer = gl.createFramebuffer(emptyList(), shadowMap) ?: error("The shadow framebuffer is incomplete")
+    private val pointShadowAtlas = gl.createRenderTexture(
+        6 * Shaders.POINT_SHADOW_FACE_SIZE, Shaders.POINT_SHADOW_SLOTS * Shaders.POINT_SHADOW_FACE_SIZE, TextureFormat.SHADOW_DEPTH24,
+    )
+    private val pointShadowFramebuffer =
+        gl.createFramebuffer(emptyList(), pointShadowAtlas) ?: error("The point shadow framebuffer is incomplete")
     private val lightTexture = gl.createDataTexture()
-    private val tileTexture = gl.createDataTexture()
+    private val clusterTexture = gl.createDataTexture()
+    private val lightIndexTexture = gl.createDataTexture()
     private val lightData = FloatArray(Shaders.MAX_LIGHTS * 2 * 4)
-    private val lightRects = arrayOfNulls<PixelRect>(Shaders.MAX_LIGHTS)
+    private val lights = mutableListOf<VisibleLight>()
 
     private val models = HashMap<String, List<GpuPart>>()
     private val textures = HashMap<String, Int>()
@@ -122,20 +142,23 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     private var width = 1
     private var height = 1
     private var targets: RenderTargets? = null
-    private var tiles = TileGrid(1, 1)
+    private var clusters = ClusterGrid(1, 1)
 
     init {
         hdr = canRenderTo(TextureFormat.RGBA16F)
         geometryProgram.samplers("uBaseColorMap" to UNIT_BASE_COLOR)
         forwardProgram.samplers(
-            "uBaseColorMap" to UNIT_BASE_COLOR, "uShadowMap" to UNIT_SHADOW_MAP,
-            "uLights" to UNIT_LIGHTS, "uTiles" to UNIT_TILES,
+            "uBaseColorMap" to UNIT_BASE_COLOR, "uShadowMap" to UNIT_SHADOW_MAP, "uPointShadowAtlas" to UNIT_POINT_SHADOWS,
+            "uLights" to UNIT_LIGHTS, "uClusters" to UNIT_CLUSTERS, "uLightIndices" to UNIT_LIGHT_INDICES,
         )
         sceneLightProgram.samplers(
             "uShadowMap" to UNIT_SHADOW_MAP, "uAlbedoMetallic" to UNIT_ALBEDO,
             "uNormalRoughness" to UNIT_NORMAL, "uDepth" to UNIT_DEPTH,
         )
-        pointLightProgram.samplers("uAlbedoMetallic" to UNIT_ALBEDO, "uNormalRoughness" to UNIT_NORMAL, "uDepth" to UNIT_DEPTH)
+        pointLightProgram.samplers(
+            "uAlbedoMetallic" to UNIT_ALBEDO, "uNormalRoughness" to UNIT_NORMAL, "uDepth" to UNIT_DEPTH,
+            "uPointShadowAtlas" to UNIT_POINT_SHADOWS,
+        )
         bloomDownProgram.samplers("uSource" to UNIT_POST_SOURCE)
         bloomUpProgram.samplers("uSource" to UNIT_POST_SOURCE)
         compositeProgram.samplers("uHdr" to UNIT_POST_SOURCE, "uBloom" to UNIT_POST_BLOOM)
@@ -150,12 +173,14 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     fun render(world: World, camera: OrbitCamera) {
         val screen = gl.boundFramebuffer()
         val targets = targetsForSize()
-        val viewProjection = camera.viewProjection(width.toFloat() / height)
+        val view = camera.view()
+        val projection = camera.projection(width.toFloat() / height)
+        val viewProjection = projection * view
         val eye = camera.eye()
         meshDrawCalls = 0
 
         collectSurfaces(world, eye)
-        collectLights(world, viewProjection)
+        collectLights(world, view, projection)
         val shadowMatrix = BIAS * lightViewProjection()
 
         gl.disableScissor()
@@ -163,6 +188,11 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         gl.setDepthTest(true)
         gl.setDepthWrite(true)
         gl.bindTexture(UNIT_SHADOW_MAP, shadowMap)
+        gl.bindTexture(UNIT_POINT_SHADOWS, pointShadowAtlas)
+        if (shadowedLights > 0) pointShadowPass()
+
+        // Uploaded once, then drawn by the key light's shadow pass and the main pass.
+        for ((part, instances) in opaque) if (instances.isNotEmpty()) uploadInstances(part, instances)
         if (shadows) shadowPass()
 
         when (pipeline) {
@@ -175,11 +205,11 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
                 gl.viewport(0, 0, width, height)
                 gl.clearColor(background.x, background.y, background.z, 1f)
                 gl.clear(color = true, depth = true)
-                useForward(viewProjection, eye, shadowMatrix)
+                useForward(viewProjection, camera, shadowMatrix)
                 drawOpaque(forwardProgram)
             }
         }
-        transparentPass(targets, viewProjection, eye, shadowMatrix)
+        transparentPass(targets, viewProjection, camera, shadowMatrix)
         postProcess(targets, screen)
 
         val error = gl.error()
@@ -189,7 +219,7 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     private fun targetsForSize(): RenderTargets {
         targets?.let { if (it.width == width && it.height == height) return it }
         targets?.delete()
-        tiles = TileGrid(width, height)
+        clusters = ClusterGrid(width, height)
         return RenderTargets(gl, width, height, if (hdr) TextureFormat.RGBA16F else TextureFormat.RGBA8).also { targets = it }
     }
 
@@ -206,30 +236,78 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
                 }
             }
         }
-        // Uploaded once, then drawn by the shadow pass and the main pass.
-        for ((part, instances) in opaque) if (instances.isNotEmpty()) uploadInstances(part, instances)
     }
 
-    private fun collectLights(world: World, viewProjection: Mat4) {
-        tiles.clear()
-        var count = 0
+    /**
+     * Culls point lights to the screen, hands out shadow atlas slots in entity order, fills the light texture
+     * (row 0: position + radius, row 1: colour + shadow slot) and builds the forward+ clusters.
+     */
+    private fun collectLights(world: World, view: Mat4, projection: Mat4) {
+        lights.clear()
+        clusters.clear()
+        var slots = 0
         world.each<PointLight, WorldTransform> { _, light, transform ->
-            if (count == Shaders.MAX_LIGHTS) return@each
+            if (lights.size == Shaders.MAX_LIGHTS) return@each
             val position = transform.matrix.translation()
-            val rect = LightCulling.screenRect(position, light.radius, viewProjection, width, height) ?: return@each
-            val row0 = count * 4
-            val row1 = (Shaders.MAX_LIGHTS + count) * 4
+            val viewCenter = view.transformPoint(position)
+            val rect = LightCulling.screenRect(viewCenter, light.radius, projection, OrbitCamera.NEAR, width, height) ?: return@each
+            val slot = if (pointShadows && light.castsShadows && slots < Shaders.POINT_SHADOW_SLOTS) slots++ else -1
+            val index = lights.size
+            lights += VisibleLight(position, light.radius, light.color, rect, slot)
+            clusters.add(index, rect, -viewCenter.z - light.radius, -viewCenter.z + light.radius)
+
+            val row0 = index * 4
+            val row1 = (Shaders.MAX_LIGHTS + index) * 4
             lightData[row0] = position.x; lightData[row0 + 1] = position.y; lightData[row0 + 2] = position.z
             lightData[row0 + 3] = light.radius
             lightData[row1] = light.color.x; lightData[row1 + 1] = light.color.y; lightData[row1 + 2] = light.color.z
-            lightRects[count] = rect
-            tiles.add(count, rect)
-            count++
+            lightData[row1 + 3] = slot.toFloat()
         }
-        visibleLights = count
-        droppedTileLights = tiles.overflowed
+        visibleLights = lights.size
+        shadowedLights = slots
+        clusters.build()
         gl.uploadDataTexture(lightTexture, Shaders.MAX_LIGHTS, 2, lightData)
-        gl.uploadDataTexture(tileTexture, tiles.textureWidth, tiles.textureHeight, tiles.data)
+        gl.uploadDataTexture(clusterTexture, clusters.clusterTextureWidth, clusters.clusterTextureHeight, clusters.clusterData)
+        gl.uploadDataTexture(lightIndexTexture, ClusterGrid.INDEX_TEXTURE_WIDTH, clusters.indexTextureHeight, clusters.indexData)
+    }
+
+    /**
+     * Six faces per shadowed light, each a 90°-plus perspective view into its tile of the atlas. Only instances whose
+     * bounding sphere reaches into the light's sphere are drawn, so a light far from everything costs nearly nothing.
+     */
+    private fun pointShadowPass() {
+        val size = Shaders.POINT_SHADOW_FACE_SIZE
+        gl.bindFramebuffer(pointShadowFramebuffer)
+        gl.viewport(0, 0, 6 * size, Shaders.POINT_SHADOW_SLOTS * size)
+        gl.clear(color = false, depth = true)
+        gl.setPolygonOffset(2f, 4f)
+        shadowProgram.use()
+        val fovY = (2.0 * atan(Shaders.POINT_SHADOW_FOV_SCALE.toDouble()) * 180.0 / PI).toFloat()
+        for (light in lights) {
+            if (light.shadowSlot < 0) continue
+            val casters = opaque.entries.mapNotNull { (part, instances) ->
+                if (part.material.isEmissive) return@mapNotNull null
+                val reaching = instances.filter { reaches(part, it, light) }
+                if (reaching.isEmpty()) null else part to reaching
+            }
+            if (casters.isEmpty()) continue
+            casters.forEach { (part, instances) -> uploadInstances(part, instances) }
+            val projection = Mat4.perspective(fovY, 1f, Shaders.POINT_SHADOW_NEAR, light.radius)
+            for (face in 0 until 6) {
+                val forward = Shaders.CUBE_FORWARD[face].let { Vec3(it[0], it[1], it[2]) }
+                val up = Shaders.CUBE_UP[face].let { Vec3(it[0], it[1], it[2]) }
+                gl.viewport(face * size, light.shadowSlot * size, size, size)
+                shadowProgram["uViewProjection"] = projection * Mat4.lookAt(light.position, light.position + forward, up)
+                casters.forEach { (part, instances) -> drawPart(null, part, instances.size) }
+            }
+        }
+        gl.setPolygonOffset(0f, 0f)
+    }
+
+    private fun reaches(part: GpuPart, instance: Instance, light: VisibleLight): Boolean {
+        val center = instance.model.transformPoint(part.boundsCenter)
+        val radius = part.boundsRadius * instance.model.maxScale()
+        return (center - light.position).length() < radius + light.radius
     }
 
     /** An orthographic view down the key light that just contains the shadow sphere. */
@@ -281,13 +359,12 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         pointLightProgram.use()
         pointLightProgram["uInverseViewProjection"] = inverseViewProjection
         pointLightProgram["uCameraPosition"] = eye
-        for (i in 0 until visibleLights) {
-            val rect = lightRects[i]!!
-            gl.scissor(rect.x, rect.y, rect.width, rect.height)
-            pointLightProgram["uPointLightPosition"] = Vec3(lightData[i * 4], lightData[i * 4 + 1], lightData[i * 4 + 2])
-            pointLightProgram["uPointLightRadius"] = lightData[i * 4 + 3]
-            val c = (Shaders.MAX_LIGHTS + i) * 4
-            pointLightProgram["uPointLightColor"] = Vec3(lightData[c], lightData[c + 1], lightData[c + 2])
+        for (light in lights) {
+            gl.scissor(light.rect.x, light.rect.y, light.rect.width, light.rect.height)
+            pointLightProgram["uPointLightPosition"] = light.position
+            pointLightProgram["uPointLightRadius"] = light.radius
+            pointLightProgram["uPointLightColor"] = light.color
+            pointLightProgram["uPointShadowSlot"] = light.shadowSlot
             gl.drawTriangles(3, 1)
         }
         gl.disableScissor()
@@ -297,13 +374,13 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     }
 
     /** Back to front, blended, depth-tested against the opaque scene but not writing depth. */
-    private fun transparentPass(targets: RenderTargets, viewProjection: Mat4, eye: Vec3, shadowMatrix: Mat4) {
+    private fun transparentPass(targets: RenderTargets, viewProjection: Mat4, camera: OrbitCamera, shadowMatrix: Mat4) {
         if (transparent.isEmpty()) return
         gl.bindFramebuffer(targets.forwardFramebuffer)
         gl.viewport(0, 0, width, height)
         gl.setBlend(Blend.ALPHA)
         gl.setDepthWrite(false)
-        useForward(viewProjection, eye, shadowMatrix)
+        useForward(viewProjection, camera, shadowMatrix)
         for (draw in transparent.sortedByDescending { it.distance }) {
             uploadInstances(draw.part, listOf(draw.instance))
             drawPart(forwardProgram, draw.part, 1)
@@ -312,12 +389,15 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         gl.setBlend(Blend.NONE)
     }
 
-    private fun useForward(viewProjection: Mat4, eye: Vec3, shadowMatrix: Mat4) {
+    private fun useForward(viewProjection: Mat4, camera: OrbitCamera, shadowMatrix: Mat4) {
         gl.bindTexture(UNIT_LIGHTS, lightTexture)
-        gl.bindTexture(UNIT_TILES, tileTexture)
+        gl.bindTexture(UNIT_CLUSTERS, clusterTexture)
+        gl.bindTexture(UNIT_LIGHT_INDICES, lightIndexTexture)
         forwardProgram.use()
         forwardProgram["uViewProjection"] = viewProjection
-        setSceneLighting(forwardProgram, eye, shadowMatrix)
+        forwardProgram["uCameraForward"] = camera.forward()
+        forwardProgram["uClusterTilesX"] = clusters.tilesX
+        setSceneLighting(forwardProgram, camera.eye(), shadowMatrix)
     }
 
     private fun setSceneLighting(program: Program, eye: Vec3, shadowMatrix: Mat4) {
@@ -390,7 +470,7 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     }
 
     /**
-     * Draws every opaque batch. With a null program only geometry is needed: that is the shadow pass,
+     * Draws every opaque batch. With a null program only geometry is needed: that is the key light's shadow pass,
      * which skips emissive surfaces, since a glowing bulb casting a dark shadow looks wrong.
      */
     private fun drawOpaque(program: Program?) {
@@ -471,7 +551,25 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         }
         gl.vertexAttribute(Shaders.TINT, 4, instanceStride, 25 * FLOAT_BYTES, divisor = 1)
         gl.bindVertexArray(0)
-        return GpuPart(vertexArray, mesh.vertexCount, instanceBuffer, material)
+
+        val (center, radius) = bounds(mesh)
+        return GpuPart(vertexArray, mesh.vertexCount, instanceBuffer, material, center, radius)
+    }
+
+    /** A bounding sphere around the box of the mesh's positions. */
+    private fun bounds(mesh: SubMesh): Pair<Vec3, Float> {
+        val min = FloatArray(3) { Float.MAX_VALUE }
+        val max = FloatArray(3) { -Float.MAX_VALUE }
+        for (v in 0 until mesh.vertexCount) {
+            for (axis in 0 until 3) {
+                val p = mesh.vertices[v * SubMesh.FLOATS_PER_VERTEX + axis]
+                if (p < min[axis]) min[axis] = p
+                if (p > max[axis]) max[axis] = p
+            }
+        }
+        if (mesh.vertexCount == 0) return Vec3.ZERO to 0f
+        val half = Vec3(max[0] - min[0], max[1] - min[1], max[2] - min[2]) * 0.5f
+        return Vec3(min[0], min[1], min[2]) + half to sqrt(half dot half)
     }
 
     private fun texture(path: String): Int = textures.getOrPut(path) { gl.createTexture(assets.readImage(path)) }
@@ -494,12 +592,14 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         const val UNIT_BASE_COLOR = 0
         const val UNIT_SHADOW_MAP = 1
         const val UNIT_LIGHTS = 2
-        const val UNIT_TILES = 3
+        const val UNIT_CLUSTERS = 3
         const val UNIT_ALBEDO = 4
         const val UNIT_NORMAL = 5
         const val UNIT_DEPTH = 6
         const val UNIT_POST_SOURCE = 7
         const val UNIT_POST_BLOOM = 8
+        const val UNIT_POINT_SHADOWS = 9
+        const val UNIT_LIGHT_INDICES = 10
 
         /** Clip space [-1, 1] to texture space [0, 1]. */
         val BIAS = Mat4.translation(Vec3(0.5f, 0.5f, 0.5f)) * Mat4.scale(Vec3(0.5f, 0.5f, 0.5f))

@@ -16,6 +16,28 @@ internal object Shaders {
 
     const val MAX_LIGHTS = 64
 
+    /**
+     * Point light shadows live in one atlas: a row per shadowed light, six cube faces across. Each face is rendered
+     * with a field of view a little wider than 90 degrees, so PCF taps at a face's edge stay inside its tile.
+     */
+    const val POINT_SHADOW_SLOTS = 8
+    const val POINT_SHADOW_FACE_SIZE = 256
+    const val POINT_SHADOW_NEAR = 0.05f
+    const val POINT_SHADOW_FOV_SCALE = POINT_SHADOW_FACE_SIZE / (POINT_SHADOW_FACE_SIZE - 4f)
+
+    /** Cube face directions and up vectors, in face order +x, -x, +y, -y, +z, -z; shared with the renderer. */
+    val CUBE_FORWARD = listOf(
+        floatArrayOf(1f, 0f, 0f), floatArrayOf(-1f, 0f, 0f), floatArrayOf(0f, 1f, 0f),
+        floatArrayOf(0f, -1f, 0f), floatArrayOf(0f, 0f, 1f), floatArrayOf(0f, 0f, -1f),
+    )
+    val CUBE_UP = listOf(
+        floatArrayOf(0f, 1f, 0f), floatArrayOf(0f, 1f, 0f), floatArrayOf(0f, 0f, 1f),
+        floatArrayOf(0f, 0f, 1f), floatArrayOf(0f, 1f, 0f), floatArrayOf(0f, 1f, 0f),
+    )
+
+    private fun vec3Array(vectors: List<FloatArray>) =
+        "vec3[6](" + vectors.joinToString(", ") { "vec3(${it[0]}, ${it[1]}, ${it[2]})" } + ")"
+
     private const val HEADER = """#version 300 es
 precision highp float;
 precision highp int;
@@ -175,15 +197,60 @@ vec3 sceneLighting(Surface s, vec3 worldPosition, vec3 v) {
 }
 """
 
-    /** Inverse-square falloff windowed to reach exactly zero at the radius (the Frostbite / UE4 form). */
-    private const val POINT_LIGHT = """
-vec3 pointLight(Surface s, vec3 worldPosition, vec3 v, vec4 positionRadius, vec3 color) {
+    /**
+     * Inverse-square falloff windowed to reach exactly zero at the radius (the Frostbite / UE4 form),
+     * times the light's cube shadow when it has an atlas [slot] (-1 for none).
+     *
+     * The shadow lookup picks the cube face by the major axis of the light-to-surface direction, projects onto that
+     * face exactly as the face was rendered (lookAt + perspective), and turns the distance along the face's axis into
+     * the depth the perspective projection would have written.
+     */
+    private val POINT_LIGHT = """
+uniform sampler2DShadow uPointShadowAtlas;
+
+const vec3 CUBE_FORWARD[6] = ${vec3Array(CUBE_FORWARD)};
+const vec3 CUBE_UP[6] = ${vec3Array(CUBE_UP)};
+const float SHADOW_NEAR = $POINT_SHADOW_NEAR;
+const float FOV_SCALE = $POINT_SHADOW_FOV_SCALE;
+const float FACE_SIZE = ${POINT_SHADOW_FACE_SIZE}.0;
+const vec2 ATLAS_TILES = vec2(6.0, ${POINT_SHADOW_SLOTS}.0);
+
+float pointShadow(int slot, vec3 lightPosition, float radius, vec3 worldPosition, vec3 n) {
+    if (slot < 0) return 1.0;
+    vec3 d = worldPosition - lightPosition;
+    // About one and a half texels of normal offset, which grow with distance from the light.
+    d += n * (length(d) * 3.0 * FOV_SCALE / FACE_SIZE);
+    vec3 a = abs(d);
+    int face = a.x >= a.y && a.x >= a.z ? (d.x >= 0.0 ? 0 : 1) : (a.y >= a.z ? (d.y >= 0.0 ? 2 : 3) : (d.z >= 0.0 ? 4 : 5));
+    vec3 forward = CUBE_FORWARD[face];
+    vec3 right = normalize(cross(forward, CUBE_UP[face]));
+    vec3 up = cross(right, forward);
+    float along = dot(d, forward);
+    vec2 ndc = vec2(dot(d, right), dot(d, up)) / (along * FOV_SCALE);
+    float far = radius;
+    float depth = ((far + SHADOW_NEAR) / (far - SHADOW_NEAR) - 2.0 * far * SHADOW_NEAR / ((far - SHADOW_NEAR) * along)) * 0.5 + 0.5;
+    if (depth >= 1.0) return 1.0;
+    vec2 uv = (vec2(float(face), float(slot)) + ndc * 0.5 + 0.5) / ATLAS_TILES;
+    vec2 texel = 1.0 / (ATLAS_TILES * FACE_SIZE);
+    float lit = 0.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            lit += texture(uPointShadowAtlas, vec3(uv + vec2(float(x), float(y)) * texel, depth));
+        }
+    }
+    return lit / 9.0;
+}
+
+vec3 pointLight(Surface s, vec3 worldPosition, vec3 v, vec4 positionRadius, vec3 color, int slot) {
     vec3 toLight = positionRadius.xyz - worldPosition;
     float distance2 = max(dot(toLight, toLight), 1e-4);
     float ratio = distance2 / (positionRadius.w * positionRadius.w);
     float window = clamp(1.0 - ratio * ratio, 0.0, 1.0);
+    if (window <= 0.0) return vec3(0.0);
     float attenuation = window * window / (distance2 + 1.0);
-    return color * attenuation * brdf(s, v, toLight * inversesqrt(distance2));
+    vec3 lit = color * attenuation * brdf(s, v, toLight * inversesqrt(distance2));
+    if (lit == vec3(0.0)) return lit;
+    return lit * pointShadow(slot, positionRadius.xyz, positionRadius.w, worldPosition, s.normal);
 }
 """
 
@@ -246,6 +313,7 @@ uniform vec3 uCameraPosition;
 uniform vec3 uPointLightPosition;
 uniform float uPointLightRadius;
 uniform vec3 uPointLightColor;
+uniform int uPointShadowSlot;
 out vec4 fragColor;
 
 void main() {
@@ -254,23 +322,28 @@ void main() {
     if (!readGBuffer(s, worldPosition)) discard;
     vec3 v = normalize(uCameraPosition - worldPosition);
     vec4 positionRadius = vec4(uPointLightPosition, uPointLightRadius);
-    fragColor = vec4(pointLight(s, worldPosition, v, positionRadius, uPointLightColor), 1.0);
+    fragColor = vec4(pointLight(s, worldPosition, v, positionRadius, uPointLightColor, uPointShadowSlot), 1.0);
 }
 """
 
     /**
-     * Forward+: shades everything in one pass, looping over only the lights listed for this pixel's tile.
+     * Forward+ (clustered): shades everything in one pass, looping over only the lights listed for this pixel's
+     * cluster, found from its screen tile and its view depth's slice.
      * Also draws transparent surfaces in the deferred path, which a G-buffer cannot hold.
      */
     val FORWARD_FRAGMENT = """$HEADER$SURFACE$MATERIAL$BRDF$SCENE_LIGHTING$POINT_LIGHT
 uniform sampler2D uLights;
-uniform sampler2D uTiles;
+uniform sampler2D uClusters;
+uniform sampler2D uLightIndices;
+uniform vec3 uCameraForward;
+uniform int uClusterTilesX;
 out vec4 fragColor;
 
-float tileSlot(ivec2 tile, int slot) {
-    vec4 texel = texelFetch(uTiles, ivec2(tile.x * ${TileGrid.TEXELS_PER_TILE} + slot / 4, tile.y), 0);
-    int component = slot - (slot / 4) * 4;
-    return component == 0 ? texel.x : component == 1 ? texel.y : component == 2 ? texel.z : texel.w;
+float lightIndex(int i) {
+    int texel = i / 4;
+    vec4 t = texelFetch(uLightIndices, ivec2(texel % ${ClusterGrid.INDEX_TEXTURE_WIDTH}, texel / ${ClusterGrid.INDEX_TEXTURE_WIDTH}), 0);
+    int component = i - texel * 4;
+    return component == 0 ? t.x : component == 1 ? t.y : component == 2 ? t.z : t.w;
 }
 
 void main() {
@@ -278,13 +351,17 @@ void main() {
     vec3 v = normalize(uCameraPosition - vWorldPosition);
     vec3 color = uEmissive * vTint.rgb + sceneLighting(s, vWorldPosition, v);
 
-    ivec2 tile = ivec2(gl_FragCoord.xy) / ${TileGrid.TILE_SIZE};
-    int count = int(tileSlot(tile, 0));
-    for (int i = 1; i <= count; i++) {
-        int light = int(tileSlot(tile, i));
+    float viewDepth = max(dot(vWorldPosition - uCameraPosition, uCameraForward), 1e-4);
+    int slice = clamp(int(floor(log(viewDepth) * ${ClusterGrid.SLICE_SCALE} + ${ClusterGrid.SLICE_BIAS})), 0, ${ClusterGrid.SLICES - 1});
+    ivec2 tile = ivec2(gl_FragCoord.xy) / ${ClusterGrid.TILE_SIZE};
+    vec4 cluster = texelFetch(uClusters, ivec2(tile.x + slice * uClusterTilesX, tile.y), 0);
+    int offset = int(cluster.x);
+    int count = int(cluster.y);
+    for (int i = 0; i < count; i++) {
+        int light = int(lightIndex(offset + i));
         vec4 positionRadius = texelFetch(uLights, ivec2(light, 0), 0);
-        vec3 lightColor = texelFetch(uLights, ivec2(light, 1), 0).rgb;
-        color += pointLight(s, vWorldPosition, v, positionRadius, lightColor);
+        vec4 colorSlot = texelFetch(uLights, ivec2(light, 1), 0);
+        color += pointLight(s, vWorldPosition, v, positionRadius, colorSlot.rgb, int(colorSlot.w));
     }
     fragColor = vec4(color, uOpacity * vTint.a);
 }

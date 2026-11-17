@@ -30,6 +30,13 @@ class Mat4 private constructor(private val m: FloatArray) {
 
     fun translation() = Vec3(this[0, 3], this[1, 3], this[2, 3])
 
+    /** The largest factor the upper 3x3 stretches any direction by, bounded by its longest column. */
+    fun maxScale(): Float {
+        var max = 0f
+        for (c in 0 until 3) max = maxOf(max, this[0, c] * this[0, c] + this[1, c] * this[1, c] + this[2, c] * this[2, c])
+        return kotlin.math.sqrt(max)
+    }
+
     /** Inverse-transpose of the upper 3x3, column-major: transforms normals correctly under non-uniform scale. */
     fun normalMatrix(): FloatArray {
         val a = this[0, 0]; val b = this[0, 1]; val c = this[0, 2]

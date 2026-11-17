@@ -40,8 +40,14 @@ class OrbitCamera(
         return target + Vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw)) * distance
     }
 
-    fun viewProjection(aspect: Float): Mat4 =
-        Mat4.perspective(effectiveFovY(aspect), aspect, NEAR, FAR) * Mat4.lookAt(eye(), target, Vec3.UP)
+    fun view(): Mat4 = Mat4.lookAt(eye(), target, Vec3.UP)
+
+    fun projection(aspect: Float): Mat4 = Mat4.perspective(effectiveFovY(aspect), aspect, NEAR, FAR)
+
+    fun viewProjection(aspect: Float): Mat4 = projection(aspect) * view()
+
+    /** Unit vector the camera looks along. */
+    fun forward(): Vec3 = (target - eye()).normalized()
 
     /** On portrait screens, widen the vertical FOV so the horizontal FOV never drops below [fovYDegrees]. */
     fun effectiveFovY(aspect: Float): Float {

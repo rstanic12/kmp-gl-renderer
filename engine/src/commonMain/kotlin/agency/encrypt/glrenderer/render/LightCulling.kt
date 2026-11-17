@@ -2,8 +2,13 @@ package agency.encrypt.glrenderer.render
 
 import agency.encrypt.glrenderer.math.Mat4
 import agency.encrypt.glrenderer.math.Vec3
+import agency.encrypt.glrenderer.scene.OrbitCamera
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.ln
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
 
 /** Pixels, origin bottom-left, as glScissor and gl_FragCoord use them. */
 data class PixelRect(val x: Int, val y: Int, val width: Int, val height: Int)
@@ -11,32 +16,18 @@ data class PixelRect(val x: Int, val y: Int, val width: Int, val height: Int)
 internal object LightCulling {
 
     /**
-     * The pixels a light of [radius] at [center] can reach, or null if it is entirely off screen.
-     * Projects the corners of the sphere's bounding box, which over-covers a little but never misses;
-     * a box that crosses the near plane cannot be projected and conservatively covers the whole screen.
+     * The pixels a light of [radius] can reach: the exact bounding rectangle of its sphere's perspective projection,
+     * including when the sphere crosses the near plane, or null if none of it is on screen.
+     *
+     * [center] is in view space (camera at the origin looking down -z). Each screen axis is solved in its own plane
+     * through the eye, as in Mara and McGuire, "2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere"
+     * (JCGT 2013).
      */
-    fun screenRect(center: Vec3, radius: Float, viewProjection: Mat4, width: Int, height: Int): PixelRect? {
-        var minX = Float.MAX_VALUE
-        var minY = Float.MAX_VALUE
-        var maxX = -Float.MAX_VALUE
-        var maxY = -Float.MAX_VALUE
-        var behind = 0
-        for (corner in 0 until 8) {
-            val x = center.x + if (corner and 1 == 0) -radius else radius
-            val y = center.y + if (corner and 2 == 0) -radius else radius
-            val z = center.z + if (corner and 4 == 0) -radius else radius
-            val w = viewProjection[3, 0] * x + viewProjection[3, 1] * y + viewProjection[3, 2] * z + viewProjection[3, 3]
-            if (w <= MIN_W) {
-                behind++
-                continue
-            }
-            val ndcX = (viewProjection[0, 0] * x + viewProjection[0, 1] * y + viewProjection[0, 2] * z + viewProjection[0, 3]) / w
-            val ndcY = (viewProjection[1, 0] * x + viewProjection[1, 1] * y + viewProjection[1, 2] * z + viewProjection[1, 3]) / w
-            minX = minOf(minX, ndcX); maxX = maxOf(maxX, ndcX)
-            minY = minOf(minY, ndcY); maxY = maxOf(maxY, ndcY)
-        }
-        if (behind == 8) return null
-        if (behind > 0) return PixelRect(0, 0, width, height)
+    fun screenRect(center: Vec3, radius: Float, projection: Mat4, near: Float, width: Int, height: Int): PixelRect? {
+        val nearZ = -near
+        if (center.z - radius > nearZ) return null
+        val (minX, maxX) = axisBounds(center.x, center.z, radius, nearZ, projection[0, 0])
+        val (minY, maxY) = axisBounds(center.y, center.z, radius, nearZ, projection[1, 1])
         if (maxX < -1f || minX > 1f || maxY < -1f || minY > 1f) return null
 
         val left = floor((minX.coerceAtLeast(-1f) * 0.5f + 0.5f) * width).toInt()
@@ -47,60 +38,133 @@ internal object LightCulling {
         return PixelRect(left, bottom, right - left, top - bottom)
     }
 
-    private const val MIN_W = 1e-4f
+    /**
+     * NDC bounds along one axis; [a] and [z] are the centre's coordinates in that axis's plane, [scale] the projection's.
+     *
+     * In that plane the visible part of the sphere is its circle cut by the near plane: an arc, closed by a chord on the
+     * near plane when the circle crosses it. Projected, its extremes can only be at the two points where lines from the
+     * eye touch the circle (if they are in front of the near plane) or at the chord's ends, so the bounds are the
+     * minimum and maximum over those candidates.
+     */
+    private fun axisBounds(a: Float, z: Float, r: Float, nearZ: Float, scale: Float): Pair<Float, Float> {
+        var low = Float.MAX_VALUE
+        var high = -Float.MAX_VALUE
+        fun candidate(pointA: Float, pointZ: Float) {
+            if (pointZ > nearZ) return
+            val ndc = scale * pointA / -pointZ
+            low = min(low, ndc)
+            high = max(high, ndc)
+        }
+
+        val tSquared = a * a + z * z - r * r
+        if (tSquared > 0f) {
+            // Tangent points: the centre direction rotated by ± the half-angle the circle subtends, at tangent length.
+            val length = sqrt(a * a + z * z)
+            val cos = sqrt(tSquared) / length
+            val sin = r / length
+            candidate((cos * a + sin * z) * cos, (-sin * a + cos * z) * cos)
+            candidate((cos * a - sin * z) * cos, (sin * a + cos * z) * cos)
+        }
+        val chordSquared = r * r - (nearZ - z) * (nearZ - z)
+        if (chordSquared >= 0f) {
+            val k = sqrt(chordSquared)
+            candidate(a - k, nearZ)
+            candidate(a + k, nearZ)
+        }
+        return low to high
+    }
 }
 
 /**
- * Forward+ light lists: the screen is cut into [TILE_SIZE] pixel tiles, and each tile lists the lights whose
- * screen rectangle touches it. ES 3.0 has no compute shaders, so the lists are built on the CPU and uploaded
- * as an RGBA32F texture: each tile owns [TEXELS_PER_TILE] texels in a row, i.e. 64 floats holding
- * the light count followed by up to [MAX_LIGHTS_PER_TILE] light indices.
+ * Clustered forward+ light lists. The view frustum is cut into [TILE_SIZE] pixel tiles and [SLICES] depth slices,
+ * spaced exponentially so near and far clusters are similar in shape; each cluster lists the lights whose screen
+ * rectangle and depth range overlap it. ES 3.0 has no compute shaders, so the lists are built on the CPU and
+ * uploaded as two RGBA32F textures:
+ *
+ * - [clusterData]: one texel per cluster, (offset, count) into the index list. Texel (x + slice * tilesX, y).
+ * - [indexData]: every cluster's light indices back to back, four per texel, [INDEX_TEXTURE_WIDTH] texels per row.
  */
-internal class TileGrid(val width: Int, val height: Int) {
+internal class ClusterGrid(val width: Int, val height: Int) {
     val tilesX = (width + TILE_SIZE - 1) / TILE_SIZE
     val tilesY = (height + TILE_SIZE - 1) / TILE_SIZE
-    val data = FloatArray(tilesX * tilesY * FLOATS_PER_TILE)
-
-    /** Tiles that had more lights than fit; those lights are dropped for that tile. */
-    var overflowed = 0
+    val clusterData = FloatArray(tilesX * tilesY * SLICES * 4)
+    var indexData = FloatArray(INDEX_TEXTURE_WIDTH * 4)
+        private set
+    var indexCount = 0
         private set
 
-    val textureWidth get() = tilesX * TEXELS_PER_TILE
-    val textureHeight get() = tilesY
+    val clusterTextureWidth get() = tilesX * SLICES
+    val clusterTextureHeight get() = tilesY
+    val indexTextureHeight get() = maxOf(1, (indexCount + INDEX_TEXTURE_WIDTH * 4 - 1) / (INDEX_TEXTURE_WIDTH * 4))
+
+    private class Entry(val light: Int, val x0: Int, val x1: Int, val y0: Int, val y1: Int, val s0: Int, val s1: Int)
+
+    private val entries = mutableListOf<Entry>()
+    private val counts = IntArray(tilesX * tilesY * SLICES)
 
     fun clear() {
-        data.fill(0f)
-        overflowed = 0
+        entries.clear()
     }
 
-    fun add(lightIndex: Int, rect: PixelRect) {
-        val firstX = (rect.x / TILE_SIZE).coerceIn(0, tilesX - 1)
-        val lastX = ((rect.x + rect.width - 1) / TILE_SIZE).coerceIn(0, tilesX - 1)
-        val firstY = (rect.y / TILE_SIZE).coerceIn(0, tilesY - 1)
-        val lastY = ((rect.y + rect.height - 1) / TILE_SIZE).coerceIn(0, tilesY - 1)
-        for (ty in firstY..lastY) {
-            for (tx in firstX..lastX) {
-                val base = (ty * tilesX + tx) * FLOATS_PER_TILE
-                val count = data[base].toInt()
-                if (count == MAX_LIGHTS_PER_TILE) {
-                    overflowed++
-                    continue
-                }
-                data[base + 1 + count] = lightIndex.toFloat()
-                data[base] = (count + 1).toFloat()
+    /** Queues [light] for the clusters under [rect] between view depths [nearDepth] and [farDepth]. */
+    fun add(light: Int, rect: PixelRect, nearDepth: Float, farDepth: Float) {
+        entries += Entry(
+            light,
+            (rect.x / TILE_SIZE).coerceIn(0, tilesX - 1),
+            ((rect.x + rect.width - 1) / TILE_SIZE).coerceIn(0, tilesX - 1),
+            (rect.y / TILE_SIZE).coerceIn(0, tilesY - 1),
+            ((rect.y + rect.height - 1) / TILE_SIZE).coerceIn(0, tilesY - 1),
+            sliceOf(nearDepth),
+            sliceOf(farDepth),
+        )
+    }
+
+    /** Lays out the queued lights: count per cluster, prefix sums for offsets, then the indices themselves. */
+    fun build() {
+        counts.fill(0)
+        forEachCluster { cluster, _ -> counts[cluster]++ }
+        var offset = 0
+        for (cluster in counts.indices) {
+            clusterData[cluster * 4] = offset.toFloat()
+            clusterData[cluster * 4 + 1] = 0f
+            offset += counts[cluster]
+        }
+        indexCount = offset
+        val needed = indexTextureHeight * INDEX_TEXTURE_WIDTH * 4
+        if (indexData.size < needed) indexData = FloatArray(needed)
+        forEachCluster { cluster, light ->
+            val filled = clusterData[cluster * 4 + 1].toInt()
+            indexData[clusterData[cluster * 4].toInt() + filled] = light.toFloat()
+            clusterData[cluster * 4 + 1] = (filled + 1).toFloat()
+        }
+    }
+
+    private inline fun forEachCluster(action: (cluster: Int, light: Int) -> Unit) {
+        for (e in entries) {
+            for (slice in e.s0..e.s1) for (y in e.y0..e.y1) for (x in e.x0..e.x1) {
+                action(y * tilesX * SLICES + slice * tilesX + x, e.light)
             }
         }
     }
 
-    fun lightsIn(tileX: Int, tileY: Int): List<Int> {
-        val base = (tileY * tilesX + tileX) * FLOATS_PER_TILE
-        return (0 until data[base].toInt()).map { data[base + 1 + it].toInt() }
+    fun lightsIn(tileX: Int, tileY: Int, slice: Int): List<Int> {
+        val cluster = tileY * tilesX * SLICES + slice * tilesX + tileX
+        val offset = clusterData[cluster * 4].toInt()
+        return (0 until clusterData[cluster * 4 + 1].toInt()).map { indexData[offset + it].toInt() }
     }
 
     companion object {
-        const val TILE_SIZE = 32
-        const val TEXELS_PER_TILE = 16
-        const val FLOATS_PER_TILE = TEXELS_PER_TILE * 4
-        const val MAX_LIGHTS_PER_TILE = FLOATS_PER_TILE - 1
+        const val TILE_SIZE = 64
+        const val SLICES = 16
+        const val INDEX_TEXTURE_WIDTH = 1024
+
+        private val LOG_RANGE = ln(OrbitCamera.FAR / OrbitCamera.NEAR)
+
+        /** slice = log(depth) * SLICE_SCALE + SLICE_BIAS, the same formula the shader evaluates. */
+        val SLICE_SCALE = SLICES / LOG_RANGE
+        val SLICE_BIAS = -SLICES * ln(OrbitCamera.NEAR) / LOG_RANGE
+
+        fun sliceOf(depth: Float): Int =
+            if (depth <= OrbitCamera.NEAR) 0 else floor(ln(depth) * SLICE_SCALE + SLICE_BIAS).toInt().coerceIn(0, SLICES - 1)
     }
 }

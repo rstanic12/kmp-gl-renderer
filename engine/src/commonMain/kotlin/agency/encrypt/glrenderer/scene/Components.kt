@@ -30,5 +30,6 @@ data class Tint(val color: Vec3) : Component
 /**
  * A point light at the entity's world position. [color] is linear and carries the intensity;
  * the light fades smoothly to nothing at [radius], which is also what culling uses.
+ * With [castsShadows], it renders a cube shadow map, within the renderer's budget of shadowed lights.
  */
-data class PointLight(val color: Vec3, val radius: Float) : Component
+data class PointLight(val color: Vec3, val radius: Float, val castsShadows: Boolean = false) : Component

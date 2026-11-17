@@ -16,6 +16,7 @@ class DemoApp(private val gl: Gl, private val assets: AssetSource) {
     private val world = DemoScene.create()
     private val camera = DemoScene.camera()
     private val lightCount = world.entities.count { it.has<PointLight>() }
+    private val shadowCasterCount = world.entities.count { it.get<PointLight>()?.castsShadows == true }
     private var renderer: Renderer? = null
     private var pipeline = Pipeline.DEFERRED
     private var paused = false
@@ -23,12 +24,12 @@ class DemoApp(private val gl: Gl, private val assets: AssetSource) {
     private var height = 1
     private var lastFrameSeconds: Double? = null
 
-    /** One line for the host to show, e.g. "Deferred · 32 point lights". */
+    /** One line for the host to show, e.g. "Deferred · 32 point lights, 6 with shadows". */
     val status: String
         get() {
             val hdr = if (renderer?.hdr == false) " · no HDR on this GPU" else ""
             val pause = if (paused) " · paused" else ""
-            return "${pipeline.label} · $lightCount point lights$hdr$pause"
+            return "${pipeline.label} · $lightCount point lights, $shadowCasterCount with shadows$hdr$pause"
         }
 
     fun surfaceCreated() {
@@ -36,6 +37,8 @@ class DemoApp(private val gl: Gl, private val assets: AssetSource) {
             it.resize(width, height)
             it.shadowCenter = Vec3(0f, 0.4f, 0f)
             it.shadowRadius = 2.2f
+            // A dim key light, so the coloured point lights and their shadows carry the scene.
+            it.lightColor = Vec3(1.1f, 1.05f, 1f)
         }
     }
 
