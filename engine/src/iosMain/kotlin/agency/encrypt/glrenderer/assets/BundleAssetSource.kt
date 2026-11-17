@@ -21,7 +21,7 @@ import platform.Foundation.stringWithContentsOfFile
 import platform.UIKit.UIImage
 
 /** Reads assets from a folder copied into the app bundle (`assets/` by default). */
-class BundleAssetSource(private val directory: String = "assets") : AssetSource {
+public class BundleAssetSource(private val directory: String = "assets") : AssetSource {
 
     private fun resolve(path: String): String {
         val root = NSBundle.mainBundle.resourcePath ?: error("App bundle has no resource path")

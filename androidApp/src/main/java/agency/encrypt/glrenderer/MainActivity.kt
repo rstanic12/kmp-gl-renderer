@@ -3,9 +3,7 @@ package agency.encrypt.glrenderer
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.graphics.Color
-import android.opengl.GLSurfaceView
 import android.os.Bundle
-import android.os.SystemClock
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
@@ -15,12 +13,11 @@ import android.widget.TextView
 import agency.encrypt.glrenderer.assets.AndroidAssetSource
 import agency.encrypt.glrenderer.demo.DemoApp
 import agency.encrypt.glrenderer.gl.AndroidGl
-import javax.microedition.khronos.egl.EGLConfig
-import javax.microedition.khronos.opengles.GL10
+import agency.encrypt.glrenderer.view.EngineSurfaceView
 
 class MainActivity : Activity() {
 
-    private lateinit var surface: GLSurfaceView
+    private lateinit var surface: EngineSurfaceView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -33,7 +30,8 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(0, 0, 0, padding)
         }
-        surface = DemoSurface(this, app) { text -> runOnUiThread { status.text = text } }
+        app.onStatusChanged = { text -> runOnUiThread { status.text = text } }
+        surface = DemoSurface(this, app)
         setContentView(FrameLayout(this).apply {
             addView(surface)
             addView(status, overlay(Gravity.TOP))
@@ -63,16 +61,9 @@ class MainActivity : Activity() {
     }
 }
 
-/**
- * Hosts [DemoApp]: GL callbacks run on the render thread, and touch input is queued onto it.
- * [onStatus] is called from the render thread whenever the status line may have changed.
- */
+/** The engine's surface view plus the demo's gestures, each queued onto the render thread. */
 @SuppressLint("ViewConstructor")
-private class DemoSurface(
-    activity: Activity,
-    private val app: DemoApp,
-    private val onStatus: (String) -> Unit,
-) : GLSurfaceView(activity) {
+private class DemoSurface(activity: Activity, private val app: DemoApp) : EngineSurfaceView(activity, app.loop) {
 
     private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
@@ -92,10 +83,7 @@ private class DemoSurface(
         }
 
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-            queueEvent {
-                app.togglePipeline()
-                onStatus(app.status)
-            }
+            queueEvent { app.togglePipeline() }
             return true
         }
 
@@ -105,27 +93,9 @@ private class DemoSurface(
         }
 
         override fun onLongPress(e: MotionEvent) {
-            queueEvent {
-                app.togglePause()
-                onStatus(app.status)
-            }
+            queueEvent { app.togglePause() }
         }
     })
-
-    init {
-        setEGLContextClientVersion(3)
-        setEGLConfigChooser(Es3ConfigChooser())
-        preserveEGLContextOnPause = true
-        setRenderer(object : Renderer {
-            override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-                app.surfaceCreated()
-                onStatus(app.status)
-            }
-
-            override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) = app.surfaceChanged(width, height)
-            override fun onDrawFrame(gl: GL10?) = app.drawFrame(SystemClock.elapsedRealtimeNanos() / 1e9)
-        })
-    }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {

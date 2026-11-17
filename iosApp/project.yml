@@ -30,13 +30,13 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: agency.encrypt.glrenderer
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
-        FRAMEWORK_SEARCH_PATHS: $(SRCROOT)/../engine/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
-        OTHER_LDFLAGS: [$(inherited), -framework, Engine]
+        FRAMEWORK_SEARCH_PATHS: $(SRCROOT)/../demo/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
+        OTHER_LDFLAGS: [$(inherited), -framework, GLRendererDemo]
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         GCC_PREPROCESSOR_DEFINITIONS: [$(inherited), GLES_SILENCE_DEPRECATION=1]
     preBuildScripts:
-      - name: Build Kotlin engine framework
+      - name: Build Kotlin framework
         basedOnDependencyAnalysis: false
         script: |
           cd "$SRCROOT/.."
-          ./gradlew :engine:embedAndSignAppleFrameworkForXcode
+          ./gradlew :demo:embedAndSignAppleFrameworkForXcode

@@ -337,6 +337,8 @@ uniform sampler2D uClusters;
 uniform sampler2D uLightIndices;
 uniform vec3 uCameraForward;
 uniform int uClusterTilesX;
+uniform float uClusterScale;
+uniform float uClusterBias;
 out vec4 fragColor;
 
 float lightIndex(int i) {
@@ -352,7 +354,7 @@ void main() {
     vec3 color = uEmissive * vTint.rgb + sceneLighting(s, vWorldPosition, v);
 
     float viewDepth = max(dot(vWorldPosition - uCameraPosition, uCameraForward), 1e-4);
-    int slice = clamp(int(floor(log(viewDepth) * ${ClusterGrid.SLICE_SCALE} + ${ClusterGrid.SLICE_BIAS})), 0, ${ClusterGrid.SLICES - 1});
+    int slice = clamp(int(floor(log(viewDepth) * uClusterScale + uClusterBias)), 0, ${ClusterGrid.SLICES - 1});
     ivec2 tile = ivec2(gl_FragCoord.xy) / ${ClusterGrid.TILE_SIZE};
     vec4 cluster = texelFetch(uClusters, ivec2(tile.x + slice * uClusterTilesX, tile.y), 0);
     int offset = int(cluster.x);

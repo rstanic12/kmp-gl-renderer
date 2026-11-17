@@ -21,25 +21,25 @@ import kotlinx.cinterop.value
 import platform.gles3.*
 
 /** OpenGL ES 3.0 through Apple's (deprecated, still shipping) OpenGLES framework. Requires a current EAGLContext. */
-class IosGl : Gl {
+public class IosGl : Gl {
 
-    override fun viewport(x: Int, y: Int, width: Int, height: Int) = glViewport(x, y, width, height)
+    override fun viewport(x: Int, y: Int, width: Int, height: Int): Unit = glViewport(x, y, width, height)
 
     override fun scissor(x: Int, y: Int, width: Int, height: Int) {
         glEnable(GL_SCISSOR_TEST.toUInt())
         glScissor(x, y, width, height)
     }
 
-    override fun disableScissor() = glDisable(GL_SCISSOR_TEST.toUInt())
-    override fun clearColor(r: Float, g: Float, b: Float, a: Float) = glClearColor(r, g, b, a)
+    override fun disableScissor(): Unit = glDisable(GL_SCISSOR_TEST.toUInt())
+    override fun clearColor(r: Float, g: Float, b: Float, a: Float): Unit = glClearColor(r, g, b, a)
 
     override fun clear(color: Boolean, depth: Boolean) {
         val mask = (if (color) GL_COLOR_BUFFER_BIT else 0) or (if (depth) GL_DEPTH_BUFFER_BIT else 0)
         glClear(mask.toUInt())
     }
 
-    override fun setDepthTest(enabled: Boolean) = enable(GL_DEPTH_TEST, enabled)
-    override fun setDepthWrite(enabled: Boolean) = glDepthMask(enabled.toGl())
+    override fun setDepthTest(enabled: Boolean): Unit = enable(GL_DEPTH_TEST, enabled)
+    override fun setDepthWrite(enabled: Boolean): Unit = glDepthMask(enabled.toGl())
 
     override fun setBlend(blend: Blend) {
         enable(GL_BLEND, blend != Blend.NONE)
@@ -95,13 +95,23 @@ class IosGl : Gl {
         shader
     }
 
-    override fun useProgram(program: Int) = glUseProgram(program.toUInt())
-    override fun uniformLocation(program: Int, name: String) = glGetUniformLocation(program.toUInt(), name)
-    override fun uniformMatrix4(location: Int, columnMajor: FloatArray) = glUniformMatrix4fv(location, 1, false.toGl(), columnMajor.refTo(0))
-    override fun uniform3f(location: Int, x: Float, y: Float, z: Float) = glUniform3f(location, x, y, z)
-    override fun uniform2f(location: Int, x: Float, y: Float) = glUniform2f(location, x, y)
-    override fun uniform1f(location: Int, value: Float) = glUniform1f(location, value)
-    override fun uniform1i(location: Int, value: Int) = glUniform1i(location, value)
+    override fun deleteProgram(program: Int): Unit = glDeleteProgram(program.toUInt())
+
+    override fun deleteVertexArray(vertexArray: Int): Unit = memScoped {
+        glDeleteVertexArrays(1, alloc<UIntVar> { value = vertexArray.toUInt() }.ptr)
+    }
+
+    override fun deleteBuffer(buffer: Int): Unit = memScoped {
+        glDeleteBuffers(1, alloc<UIntVar> { value = buffer.toUInt() }.ptr)
+    }
+
+    override fun useProgram(program: Int): Unit = glUseProgram(program.toUInt())
+    override fun uniformLocation(program: Int, name: String): Int = glGetUniformLocation(program.toUInt(), name)
+    override fun uniformMatrix4(location: Int, columnMajor: FloatArray): Unit = glUniformMatrix4fv(location, 1, false.toGl(), columnMajor.refTo(0))
+    override fun uniform3f(location: Int, x: Float, y: Float, z: Float): Unit = glUniform3f(location, x, y, z)
+    override fun uniform2f(location: Int, x: Float, y: Float): Unit = glUniform2f(location, x, y)
+    override fun uniform1f(location: Int, value: Float): Unit = glUniform1f(location, value)
+    override fun uniform1i(location: Int, value: Int): Unit = glUniform1i(location, value)
 
     override fun createVertexArray(): Int = memScoped {
         val handle = alloc<UIntVar>()
@@ -109,7 +119,7 @@ class IosGl : Gl {
         handle.value.toInt()
     }
 
-    override fun bindVertexArray(vertexArray: Int) = glBindVertexArray(vertexArray.toUInt())
+    override fun bindVertexArray(vertexArray: Int): Unit = glBindVertexArray(vertexArray.toUInt())
 
     override fun createBuffer(): Int = memScoped {
         val handle = alloc<UIntVar>()
@@ -130,7 +140,7 @@ class IosGl : Gl {
         glVertexAttribDivisor(index.toUInt(), divisor.toUInt())
     }
 
-    override fun drawTriangles(vertexCount: Int, instanceCount: Int) =
+    override fun drawTriangles(vertexCount: Int, instanceCount: Int): Unit =
         glDrawArraysInstanced(GL_TRIANGLES.toUInt(), 0, vertexCount, instanceCount)
 
     override fun createTexture(image: Image): Int {
@@ -192,7 +202,7 @@ class IosGl : Gl {
         glBindTexture(GL_TEXTURE_2D.toUInt(), texture.toUInt())
     }
 
-    override fun deleteTexture(texture: Int) = memScoped {
+    override fun deleteTexture(texture: Int): Unit = memScoped {
         glDeleteTextures(1, alloc<UIntVar> { value = texture.toUInt() }.ptr)
     }
 
@@ -219,9 +229,9 @@ class IosGl : Gl {
         return framebuffer.toInt().takeIf { complete }
     }
 
-    override fun bindFramebuffer(framebuffer: Int) = glBindFramebuffer(GL_FRAMEBUFFER.toUInt(), framebuffer.toUInt())
+    override fun bindFramebuffer(framebuffer: Int): Unit = glBindFramebuffer(GL_FRAMEBUFFER.toUInt(), framebuffer.toUInt())
 
-    override fun deleteFramebuffer(framebuffer: Int) = memScoped {
+    override fun deleteFramebuffer(framebuffer: Int): Unit = memScoped {
         glDeleteFramebuffers(1, alloc<UIntVar> { value = framebuffer.toUInt() }.ptr)
     }
 

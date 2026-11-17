@@ -17,7 +17,7 @@ jobs:
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
       - name: Unit tests and APK
-        run: ./gradlew :engine:testDebugUnitTest :androidApp:assembleDebug
+        run: ./gradlew :engine:testDebugUnitTest :demo:testDebugUnitTest :androidApp:assembleDebug
 
   ios:
     runs-on: macos-15
@@ -28,8 +28,8 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
-      - name: Engine tests on the iOS simulator
-        run: ./gradlew :engine:iosSimulatorArm64Test
+      - name: Tests on the iOS simulator
+        run: ./gradlew :engine:iosSimulatorArm64Test :demo:iosSimulatorArm64Test
       - name: Generate Xcode project
         run: |
           brew install xcodegen

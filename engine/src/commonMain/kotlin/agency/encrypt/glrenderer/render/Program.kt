@@ -11,6 +11,8 @@ internal class Program(private val gl: Gl, vertexSource: String, fragmentSource:
 
     fun use() = gl.useProgram(id)
 
+    fun delete() = gl.deleteProgram(id)
+
     private fun at(name: String) = locations.getOrPut(name) { gl.uniformLocation(id, name) }
 
     operator fun set(name: String, value: Float) = gl.uniform1f(at(name), value)

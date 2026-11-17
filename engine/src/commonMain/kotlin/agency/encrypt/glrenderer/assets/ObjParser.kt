@@ -6,15 +6,15 @@ import agency.encrypt.glrenderer.math.Vec3
  * Triangles of one object drawn with one material.
  * [vertices] is interleaved, [FLOATS_PER_VERTEX] floats each: position xyz, normal xyz, uv.
  */
-class SubMesh(val name: String, val material: String?, val vertices: FloatArray) {
-    val vertexCount get() = vertices.size / FLOATS_PER_VERTEX
+public class SubMesh(public val name: String, public val material: String?, public val vertices: FloatArray) {
+    public val vertexCount: Int get() = vertices.size / FLOATS_PER_VERTEX
 
-    companion object {
-        const val FLOATS_PER_VERTEX = 8
+    public companion object {
+        public const val FLOATS_PER_VERTEX: Int = 8
     }
 }
 
-class ObjModel(val materialLibraries: List<String>, val subMeshes: List<SubMesh>)
+public class ObjModel(public val materialLibraries: List<String>, public val subMeshes: List<SubMesh>)
 
 /**
  * Wavefront OBJ reader. Handles `v`, `vt`, `vn`, `f` (triangles and convex polygons, fan-triangulated),
@@ -24,9 +24,9 @@ class ObjModel(val materialLibraries: List<String>, val subMeshes: List<SubMesh>
  * OBJ puts v = 1 at the top of an image, while textures are uploaded top row first (top at t = 0),
  * so the emitted coordinate is t = 1 - v.
  */
-object ObjParser {
+public object ObjParser {
 
-    fun parse(text: String): ObjModel {
+    public fun parse(text: String): ObjModel {
         val positions = mutableListOf<Vec3>()
         val normals = mutableListOf<Vec3>()
         val uvs = mutableListOf<Pair<Float, Float>>()
@@ -112,7 +112,7 @@ object ObjParser {
     private val WHITESPACE = Regex("\\s+")
 }
 
-class ObjFormatException(line: Int, message: String) : IllegalArgumentException("OBJ line $line: $message")
+public class ObjFormatException(line: Int, message: String) : IllegalArgumentException("OBJ line $line: $message")
 
 /** Growable FloatArray, so large meshes are not boxed into List<Float>. */
 internal class FloatList {

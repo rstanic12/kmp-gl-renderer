@@ -1,7 +1,5 @@
 package agency.encrypt.glrenderer.scene
 
-import agency.encrypt.glrenderer.demo.DemoScene
-import agency.encrypt.glrenderer.demo.Lid
 import agency.encrypt.glrenderer.ecs.World
 import agency.encrypt.glrenderer.math.Vec3
 import agency.encrypt.glrenderer.math.assertNear
@@ -46,20 +44,5 @@ class SceneTest {
         world.update(0.5f)
 
         assertEquals(45f, entity.get<Transform>()!!.rotation.y)
-    }
-
-    @Test
-    fun demoLidOpensOnRequest() {
-        val world = DemoScene.create()
-        val lid = world.entities.single { it.has<Lid>() }
-        world.update(0f)
-        val closed = lid.get<WorldTransform>()!!.matrix.translation()
-
-        DemoScene.toggleLid(world)
-        repeat(10) { world.update(0.1f) }
-
-        assertEquals(1f, lid.get<Lid>()!!.progress)
-        val open = lid.get<WorldTransform>()!!.matrix.translation()
-        assertEquals(true, open.y > closed.y, "lid lifted: $closed -> $open")
     }
 }

@@ -111,13 +111,13 @@ class LightCullingTest {
 
     @Test
     fun clustersListLightsOnlyWhereTheirRectangleAndDepthRangeOverlap() {
-        val grid = ClusterGrid(256, 128) // 4 x 2 tiles of 64 px
+        val grid = ClusterGrid(256, 128, 0.1f, 100f) // 4 x 2 tiles of 64 px
         grid.add(0, PixelRect(0, 0, 10, 10), nearDepth = 0.5f, farDepth = 1f)
         grid.add(1, PixelRect(60, 60, 80, 10), nearDepth = 20f, farDepth = 30f) // tiles x 0..2, y 0..1
         grid.build()
 
-        val nearSlice = ClusterGrid.sliceOf(0.7f)
-        val farSlice = ClusterGrid.sliceOf(25f)
+        val nearSlice = grid.sliceOf(0.7f)
+        val farSlice = grid.sliceOf(25f)
         assertTrue(farSlice > nearSlice)
         assertEquals(listOf(0), grid.lightsIn(0, 0, nearSlice))
         assertEquals(listOf(1), grid.lightsIn(0, 0, farSlice))
@@ -128,20 +128,21 @@ class LightCullingTest {
 
     @Test
     fun clustersHaveNoPerClusterLimit() {
-        val grid = ClusterGrid(64, 64)
+        val grid = ClusterGrid(64, 64, 0.1f, 100f)
         repeat(Shaders.MAX_LIGHTS) { grid.add(it, PixelRect(0, 0, 64, 64), 1f, 2f) }
         grid.build()
-        assertEquals(Shaders.MAX_LIGHTS, grid.lightsIn(0, 0, ClusterGrid.sliceOf(1.5f)).size)
+        assertEquals(Shaders.MAX_LIGHTS, grid.lightsIn(0, 0, grid.sliceOf(1.5f)).size)
     }
 
     @Test
     fun slicesGrowExponentiallyAndCoverTheDepthRange() {
-        assertEquals(0, ClusterGrid.sliceOf(0.05f))
-        assertEquals(ClusterGrid.SLICES - 1, ClusterGrid.sliceOf(99f))
+        val grid = ClusterGrid(64, 64, 0.1f, 100f)
+        assertEquals(0, grid.sliceOf(0.05f))
+        assertEquals(ClusterGrid.SLICES - 1, grid.sliceOf(99f))
         // Each slice spans the same depth ratio: (far / near) ^ (1 / SLICES).
         val ratio = 1000.0.pow(1.0 / ClusterGrid.SLICES)
         for (k in 0 until ClusterGrid.SLICES) {
-            assertEquals(k, ClusterGrid.sliceOf((0.1 * ratio.pow(k + 0.5)).toFloat()))
+            assertEquals(k, grid.sliceOf((0.1 * ratio.pow(k + 0.5)).toFloat()))
         }
     }
 }

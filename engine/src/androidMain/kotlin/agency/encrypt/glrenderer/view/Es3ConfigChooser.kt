@@ -1,4 +1,4 @@
-package agency.encrypt.glrenderer
+package agency.encrypt.glrenderer.view
 
 import android.opengl.GLSurfaceView
 import javax.microedition.khronos.egl.EGL10

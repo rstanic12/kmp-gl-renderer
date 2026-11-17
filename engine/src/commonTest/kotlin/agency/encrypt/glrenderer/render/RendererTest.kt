@@ -14,6 +14,7 @@ import agency.encrypt.glrenderer.scene.Transform
 import agency.encrypt.glrenderer.scene.TransformSystem
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 
 /**
@@ -27,6 +28,13 @@ private class RecordingGl(private val halfFloatRenderable: Boolean = true) : Gl 
     private val programNames = mutableMapOf<Int, String>()
     private val uniformNames = mutableMapOf<Int, String>()
     private var program = ""
+
+    /** GL objects created and not yet deleted, by kind. */
+    val live = mutableMapOf<String, MutableSet<Int>>()
+    private fun create(kind: String) = nextHandle++.also { live.getOrPut(kind) { mutableSetOf() } += it }
+    private fun delete(kind: String, handle: Int) {
+        check(live[kind]?.remove(handle) == true) { "deleted $kind $handle, which is not live" }
+    }
 
     private val fragmentNames = mapOf(
         Shaders.SHADOW_FRAGMENT to "shadow",
@@ -52,7 +60,8 @@ private class RecordingGl(private val halfFloatRenderable: Boolean = true) : Gl 
     override fun setBlend(blend: Blend) { calls += "blend $blend" }
     override fun setPolygonOffset(factor: Float, units: Float) {}
     override fun createProgram(vertexSource: String, fragmentSource: String) =
-        nextHandle++.also { programNames[it] = fragmentNames.getValue(fragmentSource) }
+        create("program").also { programNames[it] = fragmentNames.getValue(fragmentSource) }
+    override fun deleteProgram(program: Int) = delete("program", program)
     override fun useProgram(program: Int) { this.program = programNames.getValue(program) }
     override fun uniformLocation(program: Int, name: String) = nextHandle++.also { uniformNames[it] = name }
     override fun uniformMatrix4(location: Int, columnMajor: FloatArray) {}
@@ -62,24 +71,26 @@ private class RecordingGl(private val halfFloatRenderable: Boolean = true) : Gl 
         if (uniformNames[location] == "uOpacity") calls += "opacity $value"
     }
     override fun uniform1i(location: Int, value: Int) {}
-    override fun createVertexArray() = nextHandle++
+    override fun createVertexArray() = create("vertexArray")
     override fun bindVertexArray(vertexArray: Int) {}
-    override fun createBuffer() = nextHandle++
+    override fun deleteVertexArray(vertexArray: Int) = delete("vertexArray", vertexArray)
+    override fun createBuffer() = create("buffer")
+    override fun deleteBuffer(buffer: Int) = delete("buffer", buffer)
     override fun bufferData(buffer: Int, data: FloatArray, floatCount: Int, dynamic: Boolean) {
         if (!dynamic) calls += "upload $floatCount floats"
     }
     override fun vertexAttribute(index: Int, size: Int, strideBytes: Int, offsetBytes: Int, divisor: Int) {}
     override fun drawTriangles(vertexCount: Int, instanceCount: Int) { calls += "draw $program $vertexCount x$instanceCount" }
-    override fun createTexture(image: Image) = nextHandle++.also { calls += "texture ${image.width}x${image.height}" }
-    override fun createRenderTexture(width: Int, height: Int, format: TextureFormat) = nextHandle++.also { textureFormats[it] = format }
-    override fun createDataTexture() = nextHandle++
+    override fun createTexture(image: Image) = create("texture").also { calls += "texture ${image.width}x${image.height}" }
+    override fun createRenderTexture(width: Int, height: Int, format: TextureFormat) = create("texture").also { textureFormats[it] = format }
+    override fun createDataTexture() = create("texture")
     override fun uploadDataTexture(texture: Int, width: Int, height: Int, rgba: FloatArray) {}
     override fun bindTexture(unit: Int, texture: Int) {}
-    override fun deleteTexture(texture: Int) {}
+    override fun deleteTexture(texture: Int) = delete("texture", texture)
     override fun createFramebuffer(colors: List<Int>, depth: Int?): Int? =
-        if (!halfFloatRenderable && colors.any { textureFormats[it] == TextureFormat.RGBA16F }) null else nextHandle++
+        if (!halfFloatRenderable && colors.any { textureFormats[it] == TextureFormat.RGBA16F }) null else create("framebuffer")
     override fun bindFramebuffer(framebuffer: Int) {}
-    override fun deleteFramebuffer(framebuffer: Int) {}
+    override fun deleteFramebuffer(framebuffer: Int) = delete("framebuffer", framebuffer)
     override fun boundFramebuffer() = 0
     override fun error() = 0
 }
@@ -109,6 +120,18 @@ class RendererTest {
                 map_Kd wood.png
                 newmtl glass
                 d 0.5
+            """.trimIndent(),
+            "crate.obj" to """
+                mtllib crate.mtl
+                v 0 0 0
+                v 1 0 0
+                v 1 1 0
+                usemtl wood
+                f 1 2 3
+            """.trimIndent(),
+            "crate.mtl" to """
+                newmtl wood
+                map_Kd wood.png
             """.trimIndent(),
         ),
     )
@@ -256,5 +279,89 @@ class RendererTest {
         // Only the start-up probe asked for half-float; every screen target fell back to RGBA8.
         assertEquals(1, gl.textureFormats.values.count { it == TextureFormat.RGBA16F })
         assertEquals(1, gl.draws().count { it.startsWith("draw composite") })
+    }
+
+    @Test
+    fun disposeFreesEveryGlObject() {
+        val gl = RecordingGl()
+        val renderer = Renderer(gl, assets).apply { resize(64, 64) }
+        val world = scene(Vec3.ZERO).apply {
+            createEntity().add(Transform(position = Vec3(0f, 2f, 0f))).add(PointLight(Vec3.ONE, 3f, castsShadows = true))
+            update(0f)
+        }
+        renderer.render(world, OrbitCamera())
+        renderer.resize(32, 32)
+        renderer.render(world, OrbitCamera()) // recreates the screen-sized targets
+
+        renderer.dispose()
+
+        assertEquals(emptyMap(), gl.live.filterValues { it.isNotEmpty() })
+    }
+
+    @Test
+    fun unloadingAModelKeepsTexturesOtherModelsStillUse() {
+        val gl = RecordingGl()
+        val renderer = renderer(gl)
+        val world = scene(Vec3.ZERO).apply {
+            createEntity().add(Transform(position = Vec3(2f, 0f, 0f))).add(ModelRef("crate.obj"))
+            update(0f)
+        }
+        renderer.render(world, OrbitCamera())
+        val buffers = gl.live.getValue("buffer").size
+        val textures = gl.live.getValue("texture").size
+
+        renderer.unloadModel("box.obj")
+
+        // box had two parts, each with a vertex and an instance buffer; wood.png stays, because crate uses it.
+        assertEquals(buffers - 4, gl.live.getValue("buffer").size)
+        assertEquals(textures, gl.live.getValue("texture").size)
+
+        renderer.unloadModel("crate.obj")
+        assertEquals(textures - 1, gl.live.getValue("texture").size)
+
+        // Still referenced by the world, so the next frame loads both again.
+        renderer.render(world, OrbitCamera())
+        assertEquals(buffers, gl.live.getValue("buffer").size)
+    }
+}
+
+class RenderLoopTest {
+    private val assets = MemoryAssets(emptyMap())
+
+    private fun loop(world: World, configure: (Renderer) -> Unit = {}) =
+        RenderLoop(RecordingGl(), assets, world, OrbitCamera(), configure)
+
+    @Test
+    fun systemsSeeTheTimeBetweenFramesClampedAndNothingWhilePaused() {
+        val steps = mutableListOf<Float>()
+        val world = World().apply { addSystem { _, dt -> steps += dt } }
+        val loop = loop(world).apply { surfaceCreated() }
+
+        loop.drawFrame(10.0)
+        loop.drawFrame(10.016)
+        loop.drawFrame(15.0) // a five second stall
+        loop.paused = true
+        loop.drawFrame(15.016)
+
+        assertEquals(listOf(0f, 0.016f, 0.1f, 0f), steps.map { (it * 1000).toInt() / 1000f })
+    }
+
+    @Test
+    fun aNewContextGetsANewConfiguredRenderer() {
+        val configured = mutableListOf<Renderer>()
+        val loop = loop(World()) { configured += it }
+
+        loop.surfaceCreated()
+        val first = loop.renderer
+        loop.surfaceCreated()
+
+        assertEquals(2, configured.size)
+        assertEquals(configured.last(), loop.renderer)
+        assertFalse(first === loop.renderer)
+    }
+
+    @Test
+    fun drawingBeforeTheSurfaceExistsIsAnError() {
+        assertFailsWith<IllegalStateException> { loop(World()).drawFrame(0.0) }
     }
 }

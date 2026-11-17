@@ -6,27 +6,27 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
-class AndroidGl : Gl {
+public class AndroidGl : Gl {
     private val handle = IntArray(1)
     private var staging: FloatBuffer = floatBuffer(1024)
 
-    override fun viewport(x: Int, y: Int, width: Int, height: Int) = GLES30.glViewport(x, y, width, height)
+    override fun viewport(x: Int, y: Int, width: Int, height: Int): Unit = GLES30.glViewport(x, y, width, height)
 
     override fun scissor(x: Int, y: Int, width: Int, height: Int) {
         GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
         GLES30.glScissor(x, y, width, height)
     }
 
-    override fun disableScissor() = GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
-    override fun clearColor(r: Float, g: Float, b: Float, a: Float) = GLES30.glClearColor(r, g, b, a)
+    override fun disableScissor(): Unit = GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+    override fun clearColor(r: Float, g: Float, b: Float, a: Float): Unit = GLES30.glClearColor(r, g, b, a)
 
     override fun clear(color: Boolean, depth: Boolean) {
         val mask = (if (color) GLES30.GL_COLOR_BUFFER_BIT else 0) or (if (depth) GLES30.GL_DEPTH_BUFFER_BIT else 0)
         GLES30.glClear(mask)
     }
 
-    override fun setDepthTest(enabled: Boolean) = enable(GLES30.GL_DEPTH_TEST, enabled)
-    override fun setDepthWrite(enabled: Boolean) = GLES30.glDepthMask(enabled)
+    override fun setDepthTest(enabled: Boolean): Unit = enable(GLES30.GL_DEPTH_TEST, enabled)
+    override fun setDepthWrite(enabled: Boolean): Unit = GLES30.glDepthMask(enabled)
 
     override fun setBlend(blend: Blend) {
         enable(GLES30.GL_BLEND, blend != Blend.NONE)
@@ -76,20 +76,23 @@ class AndroidGl : Gl {
         return shader
     }
 
-    override fun useProgram(program: Int) = GLES30.glUseProgram(program)
-    override fun uniformLocation(program: Int, name: String) = GLES30.glGetUniformLocation(program, name)
-    override fun uniformMatrix4(location: Int, columnMajor: FloatArray) = GLES30.glUniformMatrix4fv(location, 1, false, columnMajor, 0)
-    override fun uniform3f(location: Int, x: Float, y: Float, z: Float) = GLES30.glUniform3f(location, x, y, z)
-    override fun uniform2f(location: Int, x: Float, y: Float) = GLES30.glUniform2f(location, x, y)
-    override fun uniform1f(location: Int, value: Float) = GLES30.glUniform1f(location, value)
-    override fun uniform1i(location: Int, value: Int) = GLES30.glUniform1i(location, value)
+    override fun deleteProgram(program: Int): Unit = GLES30.glDeleteProgram(program)
+    override fun deleteVertexArray(vertexArray: Int): Unit = GLES30.glDeleteVertexArrays(1, intArrayOf(vertexArray), 0)
+    override fun deleteBuffer(buffer: Int): Unit = GLES30.glDeleteBuffers(1, intArrayOf(buffer), 0)
+    override fun useProgram(program: Int): Unit = GLES30.glUseProgram(program)
+    override fun uniformLocation(program: Int, name: String): Int = GLES30.glGetUniformLocation(program, name)
+    override fun uniformMatrix4(location: Int, columnMajor: FloatArray): Unit = GLES30.glUniformMatrix4fv(location, 1, false, columnMajor, 0)
+    override fun uniform3f(location: Int, x: Float, y: Float, z: Float): Unit = GLES30.glUniform3f(location, x, y, z)
+    override fun uniform2f(location: Int, x: Float, y: Float): Unit = GLES30.glUniform2f(location, x, y)
+    override fun uniform1f(location: Int, value: Float): Unit = GLES30.glUniform1f(location, value)
+    override fun uniform1i(location: Int, value: Int): Unit = GLES30.glUniform1i(location, value)
 
     override fun createVertexArray(): Int {
         GLES30.glGenVertexArrays(1, handle, 0)
         return handle[0]
     }
 
-    override fun bindVertexArray(vertexArray: Int) = GLES30.glBindVertexArray(vertexArray)
+    override fun bindVertexArray(vertexArray: Int): Unit = GLES30.glBindVertexArray(vertexArray)
 
     override fun createBuffer(): Int {
         GLES30.glGenBuffers(1, handle, 0)
@@ -108,7 +111,7 @@ class AndroidGl : Gl {
         GLES30.glVertexAttribDivisor(index, divisor)
     }
 
-    override fun drawTriangles(vertexCount: Int, instanceCount: Int) =
+    override fun drawTriangles(vertexCount: Int, instanceCount: Int): Unit =
         GLES30.glDrawArraysInstanced(GLES30.GL_TRIANGLES, 0, vertexCount, instanceCount)
 
     override fun createTexture(image: Image): Int {
@@ -175,7 +178,7 @@ class AndroidGl : Gl {
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texture)
     }
 
-    override fun deleteTexture(texture: Int) = GLES30.glDeleteTextures(1, intArrayOf(texture), 0)
+    override fun deleteTexture(texture: Int): Unit = GLES30.glDeleteTextures(1, intArrayOf(texture), 0)
 
     override fun createFramebuffer(colors: List<Int>, depth: Int?): Int? {
         val previous = boundFramebuffer()
@@ -195,8 +198,8 @@ class AndroidGl : Gl {
         return framebuffer.takeIf { complete }
     }
 
-    override fun bindFramebuffer(framebuffer: Int) = GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
-    override fun deleteFramebuffer(framebuffer: Int) = GLES30.glDeleteFramebuffers(1, intArrayOf(framebuffer), 0)
+    override fun bindFramebuffer(framebuffer: Int): Unit = GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
+    override fun deleteFramebuffer(framebuffer: Int): Unit = GLES30.glDeleteFramebuffers(1, intArrayOf(framebuffer), 0)
 
     override fun boundFramebuffer(): Int {
         GLES30.glGetIntegerv(GLES30.GL_FRAMEBUFFER_BINDING, handle, 0)

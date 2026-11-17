@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "kmp-gl-renderer"
 
-include(":engine", ":androidApp")
+include(":engine", ":demo", ":androidApp")

@@ -4,7 +4,7 @@ import agency.encrypt.glrenderer.math.Vec3
 import kotlin.math.sqrt
 
 /** Metal/roughness material. Colours are as written in the file (sRGB); [emissive] is linear and may exceed 1. */
-data class Material(
+public data class Material(
     val name: String,
     val baseColor: Vec3 = Vec3(0.8f, 0.8f, 0.8f),
     val metallic: Float = 0f,
@@ -13,10 +13,10 @@ data class Material(
     val opacity: Float = 1f,
     val baseColorMap: String? = null,
 ) {
-    val isTransparent get() = opacity < 1f
+    public val isTransparent: Boolean get() = opacity < 1f
 
-    companion object {
-        val DEFAULT = Material("default")
+    public companion object {
+        public val DEFAULT: Material = Material("default")
     }
 }
 
@@ -25,9 +25,9 @@ data class Material(
  * Files without `Pr` get a roughness derived from the Blinn-Phong exponent `Ns`, so older exports still look plausible.
  * `Ka` and `Ks` have no metal/roughness equivalent and are ignored.
  */
-object MtlParser {
+public object MtlParser {
 
-    fun parse(text: String): Map<String, Material> {
+    public fun parse(text: String): Map<String, Material> {
         val materials = LinkedHashMap<String, Material>()
         var current: Material? = null
         var hasRoughness = false
@@ -72,7 +72,7 @@ object MtlParser {
         sqrt(sqrt(2f / (exponent.coerceAtLeast(0f) + 2f))).coerceIn(MIN_ROUGHNESS, 1f)
 
     /** Below this the GGX highlight is narrower than a pixel and aliases. */
-    const val MIN_ROUGHNESS = 0.08f
+    public const val MIN_ROUGHNESS: Float = 0.08f
 
     private val WHITESPACE = Regex("\\s+")
 }

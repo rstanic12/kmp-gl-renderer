@@ -40,5 +40,5 @@ android {
 }
 
 dependencies {
-    implementation(project(":engine"))
+    implementation(project(":demo"))
 }

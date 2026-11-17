@@ -13,7 +13,9 @@ import agency.encrypt.glrenderer.gl.TextureFormat
 import agency.encrypt.glrenderer.math.Mat4
 import agency.encrypt.glrenderer.math.Vec3
 import agency.encrypt.glrenderer.scene.ModelRef
-import agency.encrypt.glrenderer.scene.OrbitCamera
+import agency.encrypt.glrenderer.scene.Camera
+import agency.encrypt.glrenderer.scene.forward
+import agency.encrypt.glrenderer.scene.position
 import agency.encrypt.glrenderer.scene.PointLight
 import agency.encrypt.glrenderer.scene.Tint
 import agency.encrypt.glrenderer.scene.WorldTransform
@@ -23,7 +25,7 @@ import kotlin.math.atan
 import kotlin.math.pow
 import kotlin.math.sqrt
 
-enum class Pipeline(val label: String) {
+public enum class Pipeline(public val label: String) {
     /** G-buffer, then lighting per light over the pixels it can reach. */
     DEFERRED("Deferred"),
 
@@ -43,44 +45,44 @@ enum class Pipeline(val label: String) {
  * Must be created and used on the thread that owns the GL context. GPU resources are created lazily the
  * first time a model is drawn and live as long as the context; after a context loss, create a new Renderer.
  */
-class Renderer(private val gl: Gl, private val assets: AssetSource) {
+public class Renderer(private val gl: Gl, private val assets: AssetSource) {
 
-    var pipeline = Pipeline.DEFERRED
-    var shadows = true
+    public var pipeline: Pipeline = Pipeline.DEFERRED
+    public var shadows: Boolean = true
 
     /** Cube shadows for point lights with [PointLight.castsShadows], up to [Shaders.POINT_SHADOW_SLOTS] of them. */
-    var pointShadows = true
-    var bloom = true
-    var fxaa = true
+    public var pointShadows: Boolean = true
+    public var bloom: Boolean = true
+    public var fxaa: Boolean = true
 
-    var exposure = 1f
-    var bloomStrength = 0.05f
-    var bloomThreshold = 1f
+    public var exposure: Float = 1f
+    public var bloomStrength: Float = 0.05f
+    public var bloomThreshold: Float = 1f
 
     /** Direction towards the key light. */
-    var lightDirection = Vec3(0.4f, 1f, 0.6f).normalized()
-    var lightColor = Vec3(3f, 2.85f, 2.6f)
-    var skyColor = Vec3(0.20f, 0.23f, 0.30f)
-    var groundColor = Vec3(0.07f, 0.06f, 0.06f)
-    var background = Vec3(0.012f, 0.014f, 0.02f)
+    public var lightDirection: Vec3 = Vec3(0.4f, 1f, 0.6f).normalized()
+    public var lightColor: Vec3 = Vec3(3f, 2.85f, 2.6f)
+    public var skyColor: Vec3 = Vec3(0.20f, 0.23f, 0.30f)
+    public var groundColor: Vec3 = Vec3(0.07f, 0.06f, 0.06f)
+    public var background: Vec3 = Vec3(0.012f, 0.014f, 0.02f)
 
     /** The sphere the key light's shadow map covers; keep it tight around what should cast shadows. */
-    var shadowCenter = Vec3.ZERO
-    var shadowRadius = 3f
+    public var shadowCenter: Vec3 = Vec3.ZERO
+    public var shadowRadius: Float = 3f
 
     /** False when the device cannot render to half-float textures: lighting then clips at 1 before tonemapping. */
-    val hdr: Boolean
+    public val hdr: Boolean
 
     /** Mesh draw calls in the last frame, all passes; instancing keeps this independent of how often a mesh repeats. */
-    var meshDrawCalls = 0
+    public var meshDrawCalls: Int = 0
         private set
 
     /** Point lights that reached the screen in the last frame. */
-    var visibleLights = 0
+    public var visibleLights: Int = 0
         private set
 
     /** Point lights that rendered a cube shadow map in the last frame. */
-    var shadowedLights = 0
+    public var shadowedLights: Int = 0
         private set
 
     private class GpuMaterial(
@@ -90,6 +92,7 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         val emissive: Vec3,
         val opacity: Float,
         val texture: Int?,
+        val texturePath: String?,
     ) {
         val isTransparent get() = opacity < 1f
         val isEmissive get() = emissive != Vec3.ZERO
@@ -98,6 +101,7 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     /** One material's triangles of a model; [boundsCenter] and [boundsRadius] bound them in model space. */
     private class GpuPart(
         val vertexArray: Int,
+        val vertexBuffer: Int,
         val vertexCount: Int,
         val instanceBuffer: Int,
         val material: GpuMaterial,
@@ -118,6 +122,10 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     private val bloomUpProgram = Program(gl, Shaders.FULLSCREEN_VERTEX, Shaders.BLOOM_UP_FRAGMENT)
     private val compositeProgram = Program(gl, Shaders.FULLSCREEN_VERTEX, Shaders.COMPOSITE_FRAGMENT)
     private val fxaaProgram = Program(gl, Shaders.FULLSCREEN_VERTEX, Shaders.FXAA_FRAGMENT)
+    private val programs = listOf(
+        shadowProgram, geometryProgram, forwardProgram, sceneLightProgram, pointLightProgram,
+        bloomDownProgram, bloomUpProgram, compositeProgram, fxaaProgram,
+    )
 
     private val emptyVertexArray = gl.createVertexArray()
     private val shadowMap = gl.createRenderTexture(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, TextureFormat.SHADOW_DEPTH24)
@@ -142,7 +150,10 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     private var width = 1
     private var height = 1
     private var targets: RenderTargets? = null
-    private var clusters = ClusterGrid(1, 1)
+    private var clusters = ClusterGrid(1, 1, 0.1f, 100f)
+    private var clusterNear = 0f
+    private var clusterFar = 0f
+    private var disposed = false
 
     init {
         hdr = canRenderTo(TextureFormat.RGBA16F)
@@ -165,22 +176,66 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         fxaaProgram.samplers("uSource" to UNIT_POST_SOURCE)
     }
 
-    fun resize(width: Int, height: Int) {
+    /** The size, in pixels, of the framebuffer [render] draws into. */
+    public fun resize(width: Int, height: Int) {
         this.width = maxOf(width, 1)
         this.height = maxOf(height, 1)
     }
 
-    fun render(world: World, camera: OrbitCamera) {
+    /**
+     * Frees a model's GPU buffers, and any of its textures no other loaded model uses. Entities still referring to
+     * [path] are fine: the model is loaded again the next time one is drawn.
+     */
+    public fun unloadModel(path: String) {
+        val parts = models.remove(path) ?: return
+        for (part in parts) {
+            opaque.remove(part)
+            gl.deleteVertexArray(part.vertexArray)
+            gl.deleteBuffer(part.vertexBuffer)
+            gl.deleteBuffer(part.instanceBuffer)
+        }
+        val stillUsed = models.values.flatten().mapNotNullTo(HashSet()) { it.material.texturePath }
+        for (texturePath in parts.mapNotNull { it.material.texturePath }.toSet() - stillUsed) {
+            textures.remove(texturePath)?.let(gl::deleteTexture)
+        }
+    }
+
+    /**
+     * Frees every GL object this renderer created. Call it on the GL thread while the context is still current;
+     * after a context loss there is nothing left to free, so just drop the renderer instead.
+     */
+    public fun dispose() {
+        if (disposed) return
+        models.keys.toList().forEach(::unloadModel)
+        programs.forEach { it.delete() }
+        targets?.delete()
+        targets = null
+        gl.deleteVertexArray(emptyVertexArray)
+        gl.deleteFramebuffer(shadowFramebuffer)
+        gl.deleteFramebuffer(pointShadowFramebuffer)
+        listOf(shadowMap, pointShadowAtlas, lightTexture, clusterTexture, lightIndexTexture).forEach(gl::deleteTexture)
+        disposed = true
+    }
+
+    /** Draws one frame of [world] as [camera] sees it, into the framebuffer that is bound when this is called. */
+    public fun render(world: World, camera: Camera) {
+        check(!disposed) { "render after dispose" }
         val screen = gl.boundFramebuffer()
         val targets = targetsForSize()
+        if (clusters.width != width || clusters.height != height || clusterNear != camera.near || clusterFar != camera.far) {
+            clusters = ClusterGrid(width, height, camera.near, camera.far)
+            clusterNear = camera.near
+            clusterFar = camera.far
+        }
         val view = camera.view()
         val projection = camera.projection(width.toFloat() / height)
         val viewProjection = projection * view
-        val eye = camera.eye()
+        val eye = camera.position()
+        val forward = camera.forward()
         meshDrawCalls = 0
 
         collectSurfaces(world, eye)
-        collectLights(world, view, projection)
+        collectLights(world, view, projection, camera.near)
         val shadowMatrix = BIAS * lightViewProjection()
 
         gl.disableScissor()
@@ -205,11 +260,11 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
                 gl.viewport(0, 0, width, height)
                 gl.clearColor(background.x, background.y, background.z, 1f)
                 gl.clear(color = true, depth = true)
-                useForward(viewProjection, camera, shadowMatrix)
+                useForward(viewProjection, eye, forward, shadowMatrix)
                 drawOpaque(forwardProgram)
             }
         }
-        transparentPass(targets, viewProjection, camera, shadowMatrix)
+        transparentPass(targets, viewProjection, eye, forward, shadowMatrix)
         postProcess(targets, screen)
 
         val error = gl.error()
@@ -219,7 +274,6 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     private fun targetsForSize(): RenderTargets {
         targets?.let { if (it.width == width && it.height == height) return it }
         targets?.delete()
-        clusters = ClusterGrid(width, height)
         return RenderTargets(gl, width, height, if (hdr) TextureFormat.RGBA16F else TextureFormat.RGBA8).also { targets = it }
     }
 
@@ -242,7 +296,7 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
      * Culls point lights to the screen, hands out shadow atlas slots in entity order, fills the light texture
      * (row 0: position + radius, row 1: colour + shadow slot) and builds the forward+ clusters.
      */
-    private fun collectLights(world: World, view: Mat4, projection: Mat4) {
+    private fun collectLights(world: World, view: Mat4, projection: Mat4, near: Float) {
         lights.clear()
         clusters.clear()
         var slots = 0
@@ -250,7 +304,7 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
             if (lights.size == Shaders.MAX_LIGHTS) return@each
             val position = transform.matrix.translation()
             val viewCenter = view.transformPoint(position)
-            val rect = LightCulling.screenRect(viewCenter, light.radius, projection, OrbitCamera.NEAR, width, height) ?: return@each
+            val rect = LightCulling.screenRect(viewCenter, light.radius, projection, near, width, height) ?: return@each
             val slot = if (pointShadows && light.castsShadows && slots < Shaders.POINT_SHADOW_SLOTS) slots++ else -1
             val index = lights.size
             lights += VisibleLight(position, light.radius, light.color, rect, slot)
@@ -374,13 +428,13 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
     }
 
     /** Back to front, blended, depth-tested against the opaque scene but not writing depth. */
-    private fun transparentPass(targets: RenderTargets, viewProjection: Mat4, camera: OrbitCamera, shadowMatrix: Mat4) {
+    private fun transparentPass(targets: RenderTargets, viewProjection: Mat4, eye: Vec3, forward: Vec3, shadowMatrix: Mat4) {
         if (transparent.isEmpty()) return
         gl.bindFramebuffer(targets.forwardFramebuffer)
         gl.viewport(0, 0, width, height)
         gl.setBlend(Blend.ALPHA)
         gl.setDepthWrite(false)
-        useForward(viewProjection, camera, shadowMatrix)
+        useForward(viewProjection, eye, forward, shadowMatrix)
         for (draw in transparent.sortedByDescending { it.distance }) {
             uploadInstances(draw.part, listOf(draw.instance))
             drawPart(forwardProgram, draw.part, 1)
@@ -389,15 +443,17 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         gl.setBlend(Blend.NONE)
     }
 
-    private fun useForward(viewProjection: Mat4, camera: OrbitCamera, shadowMatrix: Mat4) {
+    private fun useForward(viewProjection: Mat4, eye: Vec3, forward: Vec3, shadowMatrix: Mat4) {
         gl.bindTexture(UNIT_LIGHTS, lightTexture)
         gl.bindTexture(UNIT_CLUSTERS, clusterTexture)
         gl.bindTexture(UNIT_LIGHT_INDICES, lightIndexTexture)
         forwardProgram.use()
         forwardProgram["uViewProjection"] = viewProjection
-        forwardProgram["uCameraForward"] = camera.forward()
+        forwardProgram["uCameraForward"] = forward
         forwardProgram["uClusterTilesX"] = clusters.tilesX
-        setSceneLighting(forwardProgram, camera.eye(), shadowMatrix)
+        forwardProgram["uClusterScale"] = clusters.sliceScale
+        forwardProgram["uClusterBias"] = clusters.sliceBias
+        setSceneLighting(forwardProgram, eye, shadowMatrix)
     }
 
     private fun setSceneLighting(program: Program, eye: Vec3, shadowMatrix: Mat4) {
@@ -522,19 +578,24 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         }
     }
 
-    private fun gpuMaterial(modelPath: String, material: Material) = GpuMaterial(
-        baseColor = material.baseColor.let { Vec3(toLinear(it.x), toLinear(it.y), toLinear(it.z)) },
-        metallic = material.metallic,
-        roughness = material.roughness,
-        emissive = material.emissive,
-        opacity = material.opacity,
-        texture = material.baseColorMap?.let { texture(siblingPath(modelPath, it)) },
-    )
+    private fun gpuMaterial(modelPath: String, material: Material): GpuMaterial {
+        val texturePath = material.baseColorMap?.let { siblingPath(modelPath, it) }
+        return GpuMaterial(
+            baseColor = material.baseColor.let { Vec3(toLinear(it.x), toLinear(it.y), toLinear(it.z)) },
+            metallic = material.metallic,
+            roughness = material.roughness,
+            emissive = material.emissive,
+            opacity = material.opacity,
+            texture = texturePath?.let(::texture),
+            texturePath = texturePath,
+        )
+    }
 
     private fun upload(mesh: SubMesh, material: GpuMaterial): GpuPart {
         val vertexArray = gl.createVertexArray()
         gl.bindVertexArray(vertexArray)
-        gl.bufferData(gl.createBuffer(), mesh.vertices, mesh.vertices.size, dynamic = false)
+        val vertexBuffer = gl.createBuffer()
+        gl.bufferData(vertexBuffer, mesh.vertices, mesh.vertices.size, dynamic = false)
         val stride = SubMesh.FLOATS_PER_VERTEX * FLOAT_BYTES
         gl.vertexAttribute(Shaders.POSITION, 3, stride, 0, divisor = 0)
         gl.vertexAttribute(Shaders.NORMAL, 3, stride, 3 * FLOAT_BYTES, divisor = 0)
@@ -553,7 +614,7 @@ class Renderer(private val gl: Gl, private val assets: AssetSource) {
         gl.bindVertexArray(0)
 
         val (center, radius) = bounds(mesh)
-        return GpuPart(vertexArray, mesh.vertexCount, instanceBuffer, material, center, radius)
+        return GpuPart(vertexArray, vertexBuffer, mesh.vertexCount, instanceBuffer, material, center, radius)
     }
 
     /** A bounding sphere around the box of the mesh's positions. */

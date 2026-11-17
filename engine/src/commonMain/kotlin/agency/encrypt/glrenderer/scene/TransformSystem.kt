@@ -6,7 +6,7 @@ import agency.encrypt.glrenderer.ecs.World
 import agency.encrypt.glrenderer.math.Mat4
 
 /** Resolves the [Parent] hierarchy: world = parentWorld * local, each matrix computed once per frame. */
-class TransformSystem : System {
+public class TransformSystem : System {
     override fun update(world: World, deltaSeconds: Float) {
         val resolved = HashMap<Int, Mat4>()
         val inProgress = HashSet<Int>()

@@ -88,42 +88,111 @@ flowchart LR
 - **Asset pipeline** — OBJ (polygons, all index forms, negative indices, `usemtl` splits, generated face normals)
   and MTL readers that work on plain text, so they are unit-tested without a device.
   Each mesh is uploaded to the GPU once as an interleaved VBO in a VAO.
-- **Two platforms, one GL interface** — `Gl` is a ~40-method interface implemented with `GLES30` on Android
+- **A deliberate public API** — the engine builds in Kotlin's explicit API mode, so every public declaration is
+  marked as such and everything else (shaders, render targets, culling) is internal.
+- **Two platforms, one GL interface** — `Gl` is a ~45-method interface implemented with `GLES30` on Android
   and Kotlin/Native's `platform.gles3` bindings on iOS. The renderer's tests run against a recording fake of it,
   checking pass order, instancing, shadow budgets and caster culling, clustering and the half-float fallback
   without a GPU.
+
+## Using the engine
+
+The engine is the `:engine` module; it isn't published to Maven yet, so include it in your Gradle build as a module.
+A scene is a `World` of entities, and a `RenderLoop` turns the platform's GL surface callbacks into
+"run the systems, then render". Models are OBJ files with their MTL materials and textures, read through an
+`AssetSource`.
+
+```kotlin
+val world = World().apply {
+    createEntity().add(Transform()).add(ModelRef("models/chair.obj"))
+    createEntity()
+        .add(Transform(position = Vec3(0f, 2.5f, 1f)))
+        .add(PointLight(color = Vec3(6f, 5.4f, 4.5f), radius = 6f, castsShadows = true))
+    addSystem(TransformSystem()) // last: resolves the hierarchy into WorldTransform for the renderer
+}
+val camera = OrbitCamera(target = Vec3(0f, 0.5f, 0f), distance = 4f)
+```
+
+**Android** — `EngineSurfaceView` sets up an OpenGL ES 3 context and drives the loop on its render thread:
+
+```kotlin
+class ViewerActivity : Activity() {
+    private lateinit var view: EngineSurfaceView
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val loop = RenderLoop(AndroidGl(), AndroidAssetSource(assets), world, camera) { renderer ->
+            renderer.pipeline = Pipeline.FORWARD_PLUS // runs again for each new GL context
+        }
+        view = EngineSurfaceView(this, loop)
+        setContentView(view)
+    }
+
+    override fun onResume() { super.onResume(); view.onResume() }
+    override fun onPause() { view.onPause(); super.onPause() }
+}
+```
+
+Changes from the UI thread (input, settings) go through `view.queueEvent { ... }`, onto the render thread.
+
+**iOS** — build the loop in Kotlin, where default arguments and lambdas are pleasant, and drive it from a
+GLKView in Swift (`iosApp/Sources/RendererViewController.swift` is a complete example):
+
+```kotlin
+// iosMain, in your shared module: Viewer.kt
+fun createViewer(): RenderLoop = RenderLoop(IosGl(), BundleAssetSource("assets"), world, camera)
+```
+
+```swift
+loop = ViewerKt.createViewer()          // with an ES 3 EAGLContext current
+loop.surfaceCreated()
+
+override func glkView(_ view: GLKView, drawIn rect: CGRect) {
+    loop.surfaceChanged(width: Int32(view.drawableWidth), height: Int32(view.drawableHeight))
+    loop.drawFrame(timeSeconds: CACurrentMediaTime(), maxStepSeconds: 0.1)
+}
+```
+
+**Lifecycle** — everything GL happens on the thread that owns the context. A new context (after the app was
+backgrounded and the context lost) gets a fresh `Renderer`; the world and camera carry on.
+`renderer.unloadModel(path)` frees one model's GPU buffers and any textures no other model uses;
+`loop.dispose()` frees everything while the context is still alive.
+
+**Extending** — `Camera` is an interface (view matrix, projection, near and far), so any camera works.
+Systems are plain functions of the world and the frame time. `Gl` is the whole GPU surface the renderer uses, which
+is also how the tests run it without one.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph common["engine · commonMain"]
-        demo["demo<br/>DemoApp · DemoScene · LidSystem"]
+    subgraph engine[":engine · the library"]
         ecs["ecs<br/>World · Entity · System"]
-        scene["scene<br/>Transform · Parent · Spin<br/>PointLight · Tint<br/>TransformSystem · OrbitCamera"]
-        render["render<br/>Renderer · Shaders · RenderTargets<br/>LightCulling · ClusterGrid"]
+        scene["scene<br/>Transform · Parent · Spin<br/>PointLight · Tint · Camera<br/>TransformSystem · OrbitCamera"]
+        render["render<br/>RenderLoop · Renderer · Shaders<br/>RenderTargets · LightCulling · ClusterGrid"]
         assets["assets<br/>ObjParser · MtlParser"]
         gl["gl<br/>Gl interface"]
         math["math<br/>Vec3 · Mat4"]
+        android["androidMain<br/>AndroidGl · AndroidAssetSource<br/>EngineSurfaceView"]
+        ios["iosMain<br/>IosGl · BundleAssetSource"]
     end
-    android["androidMain<br/>AndroidGl · AndroidAssetSource"]
-    ios["iosMain<br/>IosGl · BundleAssetSource"]
-    aapp["androidApp<br/>GLSurfaceView host"]
+    demo[":demo<br/>DemoApp · DemoScene · LidSystem"]
+    aapp[":androidApp<br/>activity + gestures"]
     iapp["iosApp<br/>GLKView host (Swift)"]
 
-    demo --> ecs & scene & render
-    render --> assets & gl & scene
+    render --> assets & gl & scene & ecs
     scene --> math
     android -. implements .-> gl
     ios -. implements .-> gl
+    demo --> render
     aapp --> demo & android
     iapp --> demo & ios
 ```
 
-Each frame the host calls `DemoApp.drawFrame(time)`: the `World` runs its systems
+Each frame the platform host calls `RenderLoop.drawFrame(time)`: the `World` runs its systems
 (spin → lid animation → transform hierarchy), then `Renderer` draws every entity with a `ModelRef`,
-lit by every entity with a `PointLight`.
-Input is forwarded on the GL thread (`queueEvent` on Android; GLKit already draws on the main thread).
+lit by every entity with a `PointLight`. The demo is a separate module on top of the engine's public API,
+the same API an app would use.
 
 ## Building
 
@@ -139,13 +208,13 @@ Input is forwarded on the GL thread (`queueEvent` on Android; GLKit already draw
 cd iosApp && xcodegen generate && open GLRenderer.xcodeproj
 ```
 
-The Xcode build runs Gradle to produce the Kotlin `Engine` framework.
+The Xcode build runs Gradle to produce the Kotlin `GLRendererDemo` framework (the demo, exporting the engine).
 
 **Tests** — the engine tests run on the JVM and on the iOS simulator:
 
 ```sh
-./gradlew :engine:testDebugUnitTest          # any OS
-./gradlew :engine:iosSimulatorArm64Test      # macOS
+./gradlew :engine:testDebugUnitTest :demo:testDebugUnitTest            # any OS
+./gradlew :engine:iosSimulatorArm64Test :demo:iosSimulatorArm64Test    # macOS
 ```
 
 On Windows and Linux the iOS sources are still type-checked (`kotlin.native.enableKlibsCrossCompilation`);

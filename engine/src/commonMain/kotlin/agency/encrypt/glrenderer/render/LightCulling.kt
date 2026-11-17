@@ -2,7 +2,6 @@ package agency.encrypt.glrenderer.render
 
 import agency.encrypt.glrenderer.math.Mat4
 import agency.encrypt.glrenderer.math.Vec3
-import agency.encrypt.glrenderer.scene.OrbitCamera
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.ln
@@ -11,7 +10,7 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /** Pixels, origin bottom-left, as glScissor and gl_FragCoord use them. */
-data class PixelRect(val x: Int, val y: Int, val width: Int, val height: Int)
+internal data class PixelRect(val x: Int, val y: Int, val width: Int, val height: Int)
 
 internal object LightCulling {
 
@@ -84,7 +83,16 @@ internal object LightCulling {
  * - [clusterData]: one texel per cluster, (offset, count) into the index list. Texel (x + slice * tilesX, y).
  * - [indexData]: every cluster's light indices back to back, four per texel, [INDEX_TEXTURE_WIDTH] texels per row.
  */
-internal class ClusterGrid(val width: Int, val height: Int) {
+internal class ClusterGrid(val width: Int, val height: Int, private val near: Float, far: Float) {
+    private val logRange = ln(far / near)
+
+    /** slice = log(depth) * sliceScale + sliceBias; the shader evaluates the same formula with these uniforms. */
+    val sliceScale = SLICES / logRange
+    val sliceBias = -SLICES * ln(near) / logRange
+
+    fun sliceOf(depth: Float): Int =
+        if (depth <= near) 0 else floor(ln(depth) * sliceScale + sliceBias).toInt().coerceIn(0, SLICES - 1)
+
     val tilesX = (width + TILE_SIZE - 1) / TILE_SIZE
     val tilesY = (height + TILE_SIZE - 1) / TILE_SIZE
     val clusterData = FloatArray(tilesX * tilesY * SLICES * 4)
@@ -157,14 +165,5 @@ internal class ClusterGrid(val width: Int, val height: Int) {
         const val TILE_SIZE = 64
         const val SLICES = 16
         const val INDEX_TEXTURE_WIDTH = 1024
-
-        private val LOG_RANGE = ln(OrbitCamera.FAR / OrbitCamera.NEAR)
-
-        /** slice = log(depth) * SLICE_SCALE + SLICE_BIAS, the same formula the shader evaluates. */
-        val SLICE_SCALE = SLICES / LOG_RANGE
-        val SLICE_BIAS = -SLICES * ln(OrbitCamera.NEAR) / LOG_RANGE
-
-        fun sliceOf(depth: Float): Int =
-            if (depth <= OrbitCamera.NEAR) 0 else floor(ln(depth) * SLICE_SCALE + SLICE_BIAS).toInt().coerceIn(0, SLICES - 1)
     }
 }

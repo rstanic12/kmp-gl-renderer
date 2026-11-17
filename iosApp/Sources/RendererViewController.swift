@@ -1,4 +1,4 @@
-import Engine
+import GLRendererDemo
 import GLKit
 import QuartzCore
 
