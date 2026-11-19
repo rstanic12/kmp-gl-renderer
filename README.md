@@ -1,5 +1,8 @@
 # kmp-gl-renderer
 
+[![Maven Central](https://img.shields.io/maven-central/v/agency.encrypt/glrenderer)](https://central.sonatype.com/artifact/agency.encrypt/glrenderer)
+[![CI](https://github.com/rstanic12/kmp-gl-renderer/actions/workflows/ci.yml/badge.svg)](https://github.com/rstanic12/kmp-gl-renderer/actions/workflows/ci.yml)
+
 An OpenGL ES 3 renderer and entity-component system written in **Kotlin Multiplatform**, running on Android and iOS
 from one codebase: deferred and clustered forward+ pipelines, metal/roughness PBR, shadow maps for the key light and
 for point lights, HDR with bloom and tonemapping, FXAA and instancing.
@@ -97,8 +100,15 @@ flowchart LR
 
 ## Using the engine
 
-The engine is the `:engine` module; it isn't published to Maven yet, so include it in your Gradle build as a module.
-A scene is a `World` of entities, and a `RenderLoop` turns the platform's GL surface callbacks into
+The engine is on Maven Central. In a Kotlin Multiplatform module (Android and iOS targets):
+
+```kotlin
+commonMain.dependencies {
+    implementation("agency.encrypt:glrenderer:0.1.0")
+}
+```
+
+An Android-only app can use the same line in its `dependencies` block. A scene is a `World` of entities, and a `RenderLoop` turns the platform's GL surface callbacks into
 "run the systems, then render". Models are OBJ files with their MTL materials and textures, read through an
 `AssetSource`.
 
@@ -220,6 +230,9 @@ The Xcode build runs Gradle to produce the Kotlin `GLRendererDemo` framework (th
 On Windows and Linux the iOS sources are still type-checked (`kotlin.native.enableKlibsCrossCompilation`);
 only linking the framework needs a Mac. CI builds both apps, runs the tests on both platforms and
 captures a frame from the iOS simulator.
+
+**Releasing** — bump `VERSION_NAME` in `gradle.properties` and push a matching tag (`v0.2.0`). The release workflow
+tests on macOS and uploads a signed deployment to the Central Portal, where it waits for a manual Publish.
 
 ## Limits
 
